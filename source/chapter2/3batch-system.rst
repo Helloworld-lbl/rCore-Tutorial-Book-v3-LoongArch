@@ -65,35 +65,35 @@
         .global app_0_start
         .global app_0_end
     app_0_start:
-        .incbin "../user/target/riscv64gc-unknown-none-elf/release/00hello_world.bin"
+        .incbin "../user/target/loongarch64-unknown-none/release/00hello_world.bin"
     app_0_end:
 
         .section .data
         .global app_1_start
         .global app_1_end
     app_1_start:
-        .incbin "../user/target/riscv64gc-unknown-none-elf/release/01store_fault.bin"
+        .incbin "../user/target/loongarch64-unknown-none/release/01store_fault.bin"
     app_1_end:
 
         .section .data
         .global app_2_start
         .global app_2_end
     app_2_start:
-        .incbin "../user/target/riscv64gc-unknown-none-elf/release/02power.bin"
+        .incbin "../user/target/loongarch64-unknown-none/release/02power.bin"
     app_2_end:
 
         .section .data
         .global app_3_start
         .global app_3_end
     app_3_start:
-        .incbin "../user/target/riscv64gc-unknown-none-elf/release/03priv_inst.bin"
+        .incbin "../user/target/loongarch64-unknown-none/release/03priv_inst.bin"
     app_3_end:
 
         .section .data
         .global app_4_start
         .global app_4_end
     app_4_start:
-        .incbin "../user/target/riscv64gc-unknown-none-elf/release/04priv_csr.bin"
+        .incbin "../user/target/loongarch64-unknown-none/release/04priv_csr.bin"
     app_4_end:
 
 可以看到第 15 行开始的五个数据段分别插入了五个应用程序的二进制镜像，并且各自有一对全局符号 ``app_*_start, app_*_end`` 指示它们的开始和结束位置。而第 3 行开始的另一个数据段相当于一个 64 位整数数组。数组中的第一个元素表示应用程序的数量，后面则按照顺序放置每个应用程序的起始地址，最后一个元素放置最后一个应用程序的结束位置。这样每个应用程序的位置都能从该数组中相邻两个元素中得知。这个数组所在的位置同样也由全局符号 ``_num_app`` 所指示。
@@ -264,7 +264,8 @@ Rust 编译器提示我们 ``RefCell<i32>`` 未被标记为 ``Sync`` ，因此 R
 
     unsafe fn load_app(&self, app_id: usize) {
         if app_id >= self.num_app {
-            panic!("All applications completed!");
+            println!("All applications completed!");
+            loop {}
         }
         println!("[kernel] Loading app_{}", app_id);
         // clear app area
@@ -281,23 +282,23 @@ Rust 编译器提示我们 ``RefCell<i32>`` 未被标记为 ``Sync`` ，因此 R
             app_src.len()
         );
         app_dst.copy_from_slice(app_src);
-        // memory fence about fetching the instruction memory
-        asm!("fence.i");
     }
 
 
-这个方法负责将参数 ``app_id`` 对应的应用程序的二进制镜像加载到物理内存以 ``0x80400000`` 起始的位置，这个位置是批处理操作系统和应用程序之间约定的常数地址，回忆上一小节中，我们也调整应用程序的内存布局以同一个地址开头。第 7 行开始，我们首先将一块内存清空，然后找到待加载应用二进制镜像的位置，并将它复制到正确的位置。它本质上是把数据从一块内存复制到另一块内存，从批处理操作系统的角度来看，是将操作系统数据段的一部分数据（实际上是应用程序）复制到了一个可以执行代码的内存区域。在这一点上也体现了冯诺依曼计算机的 *代码即数据* 的特征。
+这个方法负责将参数 ``app_id`` 对应的应用程序的二进制镜像加载到物理内存以 ``0x300000`` 起始的位置，这个位置是批处理操作系统和应用程序之间约定的常数地址，回忆上一小节中，我们也调整应用程序的内存布局以同一个地址开头。第 7 行开始，我们首先将一块内存清空，然后找到待加载应用二进制镜像的位置，并将它复制到正确的位置。它本质上是把数据从一块内存复制到另一块内存，从批处理操作系统的角度来看，是将操作系统数据段的一部分数据（实际上是应用程序）复制到了一个可以执行代码的内存区域。在这一点上也体现了冯诺依曼计算机的 *代码即数据* 的特征。
 
 .. _term-dcache:
 .. _term-icache:
 
-注意在第 21 行我们在加载完应用代码之后插入了一条奇怪的汇编指令 ``fence.i`` ，它起到什么作用呢？我们知道缓存是存储层级结构中提高访存速度的很重要一环。而 CPU 对物理内存所做的缓存又分成 **数据缓存** (d-cache) 和 **指令缓存** (i-cache) 两部分，分别在 CPU 访存和取指的时候使用。在取指的时候，对于一个指令地址， CPU 会先去 i-cache 里面看一下它是否在某个已缓存的缓存行内，如果在的话它就会直接从高速缓存中拿到指令而不是通过总线访问内存。通常情况下， CPU 会认为程序的代码段不会发生变化，因此 i-cache 是一种只读缓存。但在这里，OS 将修改会被 CPU 取指的内存区域，这会使得 i-cache 中含有与内存中不一致的内容。因此， OS 在这里必须使用取指屏障指令 ``fence.i`` ，它的功能是保证 **在它之后的取指过程必须能够看到在它之前的所有对于取指内存区域的修改** ，这样才能保证 CPU 访问的应用代码是最新的而不是 i-cache 中过时的内容。至于硬件是如何实现 ``fence.i`` 这条指令的，这一点每个硬件的具体实现方式都可能不同，比如直接清空 i-cache 中所有内容或者标记其中某些内容不合法等等。
-
 .. warning:: 
 
-   **模拟器与真机的不同之处**
+    **关于缓存的一致性问题**
 
-   至少在 Qemu 模拟器的默认配置下，各类缓存如 i-cache/d-cache/TLB 都处于机制不完全甚至完全不存在的状态。目前在 Qemu 平台上，即使我们不加上刷新 i-cache 的指令，大概率也是能够正常运行的。但在 K210 物理计算机上，如果没有执行汇编指令 ``fence.i`` ，就会产生由于指令缓存的内容与对应内存中指令不一致导致的错误异常。
+    我们知道缓存是存储层级结构中提高访存速度的很重要一环。而 CPU 对物理内存所做的缓存又分成 **数据缓存** (d-cache) 和 **指令缓存** (i-cache) 两部分，分别在 CPU 访存和取指的时候使用。在取指的时候，对于一个指令地址， CPU 会先去 i-cache 里面看一下它是否在某个已缓存的缓存行内，如果在的话它就会直接从高速缓存中拿到指令而不是通过总线访问内存。通常情况下， CPU 会认为程序的代码段不会发生变化，因此 i-cache 是一种只读缓存。但在这里，OS 将修改会被 CPU 取指的内存区域，这会使得 i-cache 中含有与内存中不一致的内容。因此，如果硬件在此处已经启用了 i-cache，那么这里就存在 CPU 访问的应用代码是 i-cache 中过时的内容的风险。
+
+    实际上，在 LoongArch 架构下，处理器复位后工作在直接地址翻译模式下。该模式下的地址为虚实地址直接对应的关系，也就是不经 TLB 映射，也不经窗口映射。默认情况下，无论是取指访问还是数据访问，都是 Uncache 模式，也即不经缓存。这样即使硬件不对 TLB、Cache 两个结构进行初始化，处理器也能正常启动并通过软件在后续的执行中对这些结构进行初始化。尤其是早期的处理器设计由于对资源或时序的考虑，出于简化硬件设计的目标，将很多初始化工作交由软件进行。但现在大部分处理器在硬件上自动处理，从而减轻软件负担，缩短系统启动时间。例如，龙芯 3A1000和龙芯 3B1500 都没有实现硬件初始化功能，只能通过软件对 Cache 进行初始化。本身 Cache 的初始化就需要运行在 Uncache 的空间上，执行效率低下，而且当 Cache 越来越大时，所需要的执行时间就越来越长。从龙芯 3A2000 开始，龙芯处理器也实现了 TLB、各级 Cache 等结构的硬件初始化。硬件初始化的时机是在系统复位解除之后、取指访问开始之前，以此来缩短 BIOS 的启动时间。
+
+    至少在 Qemu 模拟器的默认配置下，各类缓存如 i-cache/d-cache/TLB 都处于机制不完全甚至完全不存在的状态。目前在 Qemu 平台上，即使我们不考虑缓存的一致性问题，程序大概率也是能够正常运行的。但在一些型号的物理计算机上，如果不考虑这一点，可能就会产生由于指令缓存的内容与对应内存中指令不一致导致的错误异常。
 
 ``batch`` 子模块对外暴露出如下接口：
 

@@ -41,7 +41,13 @@ Github Classroom方式进行在线OS 环境配置
 本地操作系统开发环境配置
 -------------------------------------------------
 
-目前实验内容可支持在 `Ubuntu操作系统 <https://cdimage.ubuntu.com/releases/>`_ 、 `openEuler操作系统 <https://repo.openeuler.org/openEuler-20.03-LTS-SP2/ISO/>`_ 、 `龙蜥操作系统 <https://openanolis.cn/anolisos>`_ 等上面进行操作。对于 Windows10/11 和 macOS 上的用户，可以使用WSL2、VMware Workstation 或 VirtualBox 等相关软件，通过虚拟机方式安装 Ubuntu18.04 / 20.04、openEuler操作系统、龙蜥操作系统等，并在上面进行实验。
+.. 目前实验内容可支持在 `Ubuntu操作系统 <https://cdimage.ubuntu.com/releases/>`_ 、 `openEuler操作系统 <https://repo.openeuler.org/openEuler-20.03-LTS-SP2/ISO/>`_ 、 `龙蜥操作系统 <https://openanolis.cn/anolisos>`_ 等上面进行操作。对于 Windows10/11 和 macOS 上的用户，可以使用WSL2、VMware Workstation 或 VirtualBox 等相关软件，通过虚拟机方式安装 Ubuntu18.04 / 20.04、openEuler操作系统、龙蜥操作系统等，并在上面进行实验。
+
+由于 LoongArch 生态目前还不太成熟，各工具之间以及各工具与操作系统之间的依赖关系较为复杂，所以虽然可以容易地在网上找到实验所需的相关工具，但要完整地安装好一套可以互相兼容的工具链还是较为繁琐。在经过多次试错后，我们将一套可以互相兼容运行的工具链整理为一个仓库方便大家直接下载使用。但可惜这套工具链版本较老，所以欢迎大家尝试更新版本的工具链，并在此将您的经验与大家分享。
+
+上述工具链目前仅在 Ubuntu 20.04 上验证过兼容性，因此推荐安装 Ubuntu 20.04 。
+
+.. warning:: 本实验所用工具链版本较老，不兼容 Ubuntu 22.04 。
 
 Windows的WSL2方式建立Linux环境
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -118,7 +124,7 @@ Docker方式进行本地OS开发环境配置
 C 开发环境配置
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-在实验或练习过程中，也会涉及部分基于C语言的开发，可以安装基本的本机开发环境和交叉开发环境。下面是以Ubuntu 20.04为例，需要安装的C 开发环境涉及的软件：
+在实验或练习过程中，也会涉及部分基于C语言的开发，可以安装基本的本机开发环境和交叉开发环境。下面是以Ubuntu 20.04为例，需要安装的 C 开发环境涉及的软件：
 
 .. code-block:: bash
 
@@ -217,10 +223,13 @@ Rust 开发环境配置
 
 .. code-block:: bash
 
-   rustup target add riscv64gc-unknown-none-elf
-   cargo install cargo-binutils
-   rustup component add llvm-tools-preview
-   rustup component add rust-src
+    # 增加 LoongArch 架构
+    rustup target add loongarch64-unknown-none
+
+    # 其它
+    cargo install cargo-binutils
+    rustup component add llvm-tools
+    rustup component add rust-src
 
 .. warning::
    如果你换了另外一个rustc编译器（必须是nightly版的），需要重新安装上述rustc所需软件包。rCore-Tutorial 仓库中的 ``Makefile`` 包含了这些工具的安装，如果你使用 ``make run`` 也可以不手动安装。
@@ -233,70 +242,52 @@ Rust 开发环境配置
    * Visual Studio Code 是开源软件，不用付费就可使用。
    * 当然，采用 VIM，Emacs 等传统的编辑器也是没有问题的。
 
-QEMU 模拟器安装
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+安装其他 LoongArch 相关工具
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-我们需要使用 QEMU 7.0 版本进行实验，低版本的 QEMU 可能导致框架代码不能正常运行。而很多 Linux 发行版的软件包管理器默认软件源中的 QEMU 版本过低，因此我们需要从源码手动编译安装 QEMU 模拟器软件。下面以 Ubuntu 18.04/20.04 上的安装流程为例进行说明：
+我们还需要安装 LoongArch 交叉编译工具及 QEMU 模拟器等。正如前面提到的，我们已经将这些工具打包为一个仓库，大家可在 github 或 Gitee 上下载。
 
-.. chyyuu warning::
+- `github 下载地址 <https://rcore-os.cn/rCore-Tutorial-Book-v3/chapter0/5setup-devel-env.html>`_ 
+- `Gitee 下载地址 <https://rcore-os.cn/rCore-Tutorial-Book-v3/chapter0/5setup-devel-env.html>`_
 
-   注意，如果安装了 QEMU 6.0+ 版本，则目前需要将项目目录下的 bootloader（也即 RustSBI）更新为最新的 0.2.0-alpha.6 版本。它们目前可以在 ``chX-dev`` 分支中找到。
+可以在仓库根目录下使用 ``tree -L 2`` 命令展示仓库结构如下，注意我们对一些重要文件或文件夹进行了说明。
 
+.. code-block:: 
 
-首先我们安装依赖包，获取 QEMU 源代码并手动编译：
+   .
+   ├── cross-tools（LoongArch 交叉编译工具）
+   │   ├── bin（可执行文件目录）
+   │   ├── include
+   │   ├── lib
+   │   ├── libexec
+   │   ├── loongarch64-unknown-linux-gnu
+   │   ├── share
+   │   └── target
+   ├── efi-virtio.rom
+   ├── gdb_cmd
+   ├── gdb.sh（gdb 启动脚本）
+   ├── kernel（默认内核镜像）
+   ├── qemu（qemu 模拟器及其他相关文件）
+   │   ├── busybox-rootfs.img（文件系统镜像）
+   │   ├── loongarch_bios_0310_debug.bin（BIOS）
+   │   └── qemu-system-loongarch64（qemu 可执行文件）
+   ├── run.sh（qemu 运行脚本）
+   └── vgabios-stdvga.bin
 
-.. code-block:: bash
+LoongArch 交叉编译工具的更新版本可 `在此下载 <https://github.com/sunhaiyong1978/CLFS-for-LoongArch/releases>`_ ，我们使用的是最早的 2.0 版本。
 
-   # 安装编译所需的依赖包
-   sudo apt install autoconf automake autotools-dev curl libmpc-dev libmpfr-dev libgmp-dev \
-                 gawk build-essential bison flex texinfo gperf libtool patchutils bc \
-                 zlib1g-dev libexpat-dev pkg-config  libglib2.0-dev libpixman-1-dev libsdl2-dev \
-                 git tmux python3 python3-pip ninja-build 
-   # 下载源码包 
-   # 如果下载速度过慢可以使用我们提供的百度网盘链接：https://pan.baidu.com/s/1dykndFzY73nqkPL2QXs32Q 
-   # 提取码：jimc 
-   wget https://download.qemu.org/qemu-7.0.0.tar.xz
-   # 解压
-   tar xvJf qemu-7.0.0.tar.xz
-   # 编译安装并配置 RISC-V 支持
-   cd qemu-7.0.0
-   ./configure --target-list=riscv64-softmmu,riscv64-linux-user  # 如果要支持图形界面，可添加 " --enable-sdl" 参数
-   make -j$(nproc)
+.. _link-add-to-PATH:
 
-.. note::
-   
-   注意，上面的依赖包可能并不完全，比如在 Ubuntu 18.04 上：
+为了 Rust 能更容易地找到交叉编译工具，建议将交叉编译工具的二进制文件目录 ``.../loongarch-tools/cross-tools/bin`` 加入 PATH 变量。为了便于找到 ``qemu-system-loongarch64`` ，我们可以将其所在的 ``.../loongarch-tools/qemu`` 目录加入 PATH 变量，当然也可以将其复制一份粘贴到 ``.../loongarch-tools/cross-tools/bin`` 目录下，任选一种方式即可。
 
-   - 出现 ``ERROR: pkg-config binary 'pkg-config' not found`` 时，可以安装 ``pkg-config`` 包；
-   - 出现 ``ERROR: glib-2.48 gthread-2.0 is required to compile QEMU`` 时，可以安装 
-     ``libglib2.0-dev`` 包；
-   - 出现 ``ERROR: pixman >= 0.21.8 not present`` 时，可以安装 ``libpixman-1-dev`` 包。
+此时，在仓库根目录下执行 ``./run.sh`` 即可以以默认配置运行 QEMU 模拟器。第一次运行 QEMU 模拟器时可能会提示缺库，使用 ``apt`` 工具安装缺失的库即可。下面给出了我们补充安装的所有库，可以尝试先执行下面的命令安装大部分缺库，若仍有缺库再自行安装。
 
-   另外一些 Linux 发行版编译 QEMU 的依赖包可以从 `这里 <https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html#prerequisites>`_ 找到。
+.. code-block:: console
 
-之后我们可以在同目录下 ``sudo make install`` 将 QEMU 安装到 ``/usr/local/bin`` 目录下，但这样经常会引起冲突。个人来说更习惯的做法是，编辑 ``~/.bashrc`` 文件（如果使用的是默认的 ``bash`` 终端），在文件的末尾加入几行：
+   sudo apt-get install libpixman-1-0 libepoxy0 libspice-server1 libsdl2-2.0-0 libfdt1 libusbredirparser1 libgbm1 libgtk-3-0 libfuse3-3
 
-.. code-block:: bash
+   libpython2.7
 
-   # 请注意，qemu-7.0.0 的父目录可以随着你的实际安装位置灵活调整
-   export PATH=$PATH:/path/to/qemu-7.0.0/build
-
-随后即可在当前终端 ``source ~/.bashrc`` 更新系统路径，或者直接重启一个新的终端。
-
-此时我们可以确认 QEMU 的版本：
-
-.. code-block:: bash
-
-   qemu-system-riscv64 --version
-   qemu-riscv64 --version
-
-在其他缺少预编译 QEMU with RV64 软件包的Linux x86-64 环境（如openEuler操作系统）上，首先需要从 openEuler 社区维护的 QEMU 的 `riscv分支 <https://gitee.com/src-openeuler/qemu/tree/riscv/>`_ 下载 QEMU 源码，并直接通过 rpmbuild 进行构建。
-
-.. warning::
-
-   请尽量不要安装 ``qemu-kvm`` ，这可能会导致我们的框架无法正常运行。如果已经安装，可以考虑换用 Docker 。
-
-   另外，我们仅在 Qemu 7.0.0 版本上进行了测试，请尽量不要切换到其他版本。
 
 K210 真机串口通信
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,13 +1,207 @@
-管理 SV39 多级页表
+管理 LoongArch 多级页表
 ========================================================
-
 
 本节导读
 --------------------------
 
+上一节我们介绍了 LoongArch 存储管理的硬件机制，本节我们主要讲解基于上述硬件机制的操作系统内存管理。这首先需要对地址和页表项进行数据结构抽象的类型定义，还需进一步管理计算机系统中当前已经使用的或空闲的物理页帧，这样操作系统才能给应用程序动态分配或回收物理地址空间。有了有效的物理内存空间的管理，操作系统就能够在物理内存空间中建立多级页表（页表占用物理内存），为应用程序和操作系统自身建立虚实地址映射关系，从而实现虚拟内存空间，即给应用“看到”的地址空间。
 
-上一节更多的是站在硬件的角度来分析SV39多级页表的硬件机制，本节我们主要讲解基于 SV39 多级页表机制的操作系统内存管理。这还需进一步管理计算机系统中当前已经使用的或空闲的物理页帧，这样操作系统才能给应用程序动态分配或回收物理地址空间。有了有效的物理内存空间的管理，操作系统就能够在物理内存空间中建立多级页表（页表占用物理内存），为应用程序和操作系统自身建立虚实地址映射关系，从而实现虚拟内存空间，即给应用“看到”的地址空间。
+地址与页表项的数据结构抽象与类型定义
+------------------------------------------------------------
 
+地址相关的数据结构抽象与类型定义
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+正如本章第一小节所说，在分页内存管理中，地址转换的核心任务在于如何维护虚拟页号到物理页号的映射——也就是页表。不过在具体实现它之前，我们先将地址和页号的概念抽象为 Rust 中的类型，借助 Rust 的类型安全特性来确保它们被正确实现。
+
+首先是这些类型的定义：
+
+.. code-block:: rust
+
+    // os/src/mm/address.rs
+
+    #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+    pub struct PhysAddr(pub usize);
+
+    #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+    pub struct VirtAddr(pub usize);
+
+    #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+    pub struct PhysPageNum(pub usize);
+
+    #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+    pub struct VirtPageNum(pub usize);
+
+.. _term-type-conversion:
+
+上面分别给出了物理地址、虚拟地址、物理页号、虚拟页号的 Rust 类型声明，它们都是 Rust 的元组式结构体，可以看成 usize 的一种简单包装。我们刻意将它们各自抽象出不同的类型而不是都使用与 LoongArch 64硬件直接对应的 usize 基本类型，就是为了在 Rust 编译器的帮助下，通过多种方便且安全的 **类型转换** (Type Conversion) 来构建页表。
+
+首先，这些类型本身可以和 usize 之间互相转换，以物理地址 ``PhysAddr`` 为例，我们需要：
+
+.. code-block:: rust
+
+    // os/src/mm/address.rs
+
+    pub const PALEN: usize = 48;
+    pub const PPN_WIDTH: usize = PALEN - PAGE_SIZE_BITS;
+
+    impl From<usize> for PhysAddr {
+        fn from(v: usize) -> Self { Self(v & ((1 << PALEN) - 1)) }
+    }
+    impl From<usize> for PhysPageNum {
+        fn from(v: usize) -> Self { Self(v & ((1 << PPN_WIDTH) - 1)) }
+    }
+
+    impl From<PhysAddr> for usize {
+        fn from(v: PhysAddr) -> Self { v.0 }
+    }
+    impl From<PhysPageNum> for usize {
+        fn from(v: PhysPageNum) -> Self { v.0 }
+    }
+
+前者允许我们从一个 ``usize`` 来生成 ``PhysAddr`` ，即 ``PhysAddr::from(_: usize)`` 将得到一个 ``PhysAddr`` 。注意 LoongArch 架构的不同实现支持的物理地址位宽不同，这里选择 qemu 模拟器模拟的龙芯 3A5000/3B5000 处理器所支持的物理地址位宽 48 位，由于最高位无需存放因此在生成 ``PhysAddr`` 的时候我们仅使用 ``usize`` 较低的 48 位。同理在生成虚拟地址 ``VirtAddr`` 的时候仅使用 ``usize`` 较低的 48 位。反过来，从 ``PhysAddr`` 等类型也很容易得到对应的 ``usize`` 。其实由于我们在声明结构体的时候将字段公开了出来，从物理地址变量 ``pa`` 得到它的 usize 表示的更简便方法是直接 ``pa.0`` 。
+
+.. note::
+
+    **Rust Tips：类型转换之 From 和 Into**
+
+    一般而言，当我们为类型 ``U`` 实现了 ``From<T>`` Trait 之后，可以使用 ``U::from(_: T)`` 来从一个 ``T`` 类型的实例来构造一个 ``U`` 类型的实例；而当我们为类型 ``U`` 实现了 ``Into<T>`` Trait 之后，对于一个 ``U`` 类型的实例 ``u`` ，可以使用 ``u.into()`` 来将其转化为一个类型为 ``T`` 的实例。
+
+    当我们为 ``U`` 实现了 ``From<T>`` 之后，Rust 会自动为 ``T`` 实现 ``Into<U>`` Trait，因为它们两个本来就是在做相同的事情。因此我们只需相互实现 ``From`` 就可以相互 ``From/Into`` 了。
+
+    需要注意的是，当我们使用 ``From`` Trait 的 ``from`` 方法来构造一个转换后类型的实例的时候，``from`` 的参数已经指明了转换前的类型，因而 Rust 编译器知道该使用哪个实现；而使用 ``Into`` Trait 的 ``into`` 方法来将当前类型转化为另一种类型的时候，它并没有参数，因而函数签名中并没有指出要转化为哪一个类型，则我们必须在其它地方 *显式* 指出目标类型。比如，当我们要将 ``u.into()`` 绑定到一个新变量 ``t`` 的时候，必须通过 ``let t: T`` 显式声明 ``t`` 的类型；又或是将 ``u.into()`` 的结果作为参数传给某一个函数，那么由于这个函数的函数签名中指出了传入位置的参数的类型，所以 Rust 编译器也就明确知道转换的类型。
+
+    请注意，解引用 ``Deref`` Trait 是 Rust 编译器唯一允许的一种隐式类型转换，而对于其他的类型转换，我们必须手动调用类型转化方法或者是显式给出转换前后的类型。这体现了 Rust 的类型安全特性，在 C/C++ 中并不是如此，比如两个不同的整数/浮点数类型进行二元运算的时候，编译器经常要先进行隐式类型转换使两个操作数类型相同，而后再进行运算，导致了很多数值溢出或精度损失问题。Rust 不会进行这种隐式类型转换，它会在编译期直接报错，提示两个操作数类型不匹配。
+
+其次，地址和页号之间可以相互转换。我们这里仍以物理地址和物理页号之间的转换为例：
+
+.. code-block:: rust
+    :linenos:
+
+    // os/src/mm/address.rs
+
+    impl PhysAddr {
+        pub fn page_offset(&self) -> usize { self.0 & (PAGE_SIZE - 1) }
+    }
+
+    impl From<PhysAddr> for PhysPageNum {
+        fn from(v: PhysAddr) -> Self {
+            assert_eq!(v.page_offset(), 0);
+            v.floor()
+        }
+    }
+
+    impl From<PhysPageNum> for PhysAddr {
+        fn from(v: PhysPageNum) -> Self { Self(v.0 << PAGE_SIZE_BITS) }
+    }
+
+其中 ``PAGE_SIZE`` 为 :math:`0x4000` ， ``PAGE_SIZE_BITS`` 为 :math:`14` ，它们均定义在 ``config`` 子模块中，分别表示每个页面的大小和页内偏移的位宽。从物理页号到物理地址的转换只需左移 :math:`14` 位即可，但是物理地址需要保证它与页面大小对齐才能通过右移转换为物理页号。
+
+对于不对齐的情况，物理地址不能通过 ``From/Into`` 转换为物理页号，而是需要通过它自己的 ``floor`` 或 ``ceil`` 方法来进行下取整或上取整的转换。
+
+.. code-block:: rust
+
+    // os/src/mm/address.rs
+
+    impl PhysAddr {
+        pub fn floor(&self) -> PhysPageNum { PhysPageNum(self.0 / PAGE_SIZE) }
+        pub fn ceil(&self) -> PhysPageNum { PhysPageNum((self.0 + PAGE_SIZE - 1) / PAGE_SIZE) }
+    }
+
+我们暂时先介绍这两种最简单的类型转换。
+
+页表项的数据结构抽象与类型定义
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+上一小节我们已经介绍了页表项的具体结构，现在我们使用 Rust 来定义页表项。首先来实现页表项中的标志位 ``PTEFlags`` ：
+
+.. code-block:: rust
+
+    // os/src/main.rs
+
+    #[macro_use]
+    extern crate bitflags;
+
+    // os/src/mm/page_table.rs
+
+    use bitflags::*;
+
+    bitflags! {
+        /// page table entry flags
+        pub struct PTEFlags: u64 {
+            const V = 1 << 0;
+            const D = 1 << 1;
+            const PLV_L = 1 << 2;
+            const PLV_H = 1 << 3;
+            const MAT_L = 1 << 4;
+            const MAT_H = 1 << 5;
+            const G = 1 << 6;
+            const P = 1 << 7;
+            const W = 1 << 8;
+            const NR = 1 << 61;
+            const NX = 1 << 62;
+            const RPLV = 1 << 63;
+        }
+    }
+
+`bitflags <https://docs.rs/bitflags/1.2.1/bitflags/>`_ 是一个 Rust 中常用来比特标志位的 crate 。它提供了一个 ``bitflags!`` 宏，如上面的代码段所展示的那样，可以将一个 ``u64`` 封装成一个标志位的集合类型，支持一些常见的集合运算。它的一些使用细节这里不展开，请同学自行参考它的官方文档。注意，在使用之前我们需要引入该 crate 的依赖：
+
+.. code-block:: toml
+
+    # os/Cargo.toml
+
+    [dependencies]
+    bitflags = "1.2.1"
+
+接下来我们实现页表项 ``PageTableEntry`` ：
+
+.. code-block:: rust
+    :linenos:
+
+    // os/src/mm/page_table.rs
+
+    #[derive(Copy, Clone)]
+    #[repr(C)]
+    pub struct PageTableEntry {
+        pub bits: usize,
+    }
+
+    impl PageTableEntry {
+        pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
+            PageTableEntry {
+                bits: ppn.0 << PAGE_SIZE_BITS | flags.bits as usize,
+            }
+        }
+        pub fn empty() -> Self {
+            PageTableEntry { bits: 0 }
+        }
+        pub fn ppn(&self) -> PhysPageNum {
+            ((self.bits & ((1usize << PALEN) - 1)) >> PAGE_SIZE_BITS).into()
+        }
+        pub fn flags(&self) -> PTEFlags {
+            unsafe {
+                PTEFlags::from_bits_unchecked(self.bits as u64)
+            }
+        }
+    }
+
+- 第 3 行我们让编译器自动为 ``PageTableEntry`` 实现 ``Copy/Clone`` Trait，来让这个类型以值语义赋值/传参的时候不会发生所有权转移，而是拷贝一份新的副本。从这一点来说 ``PageTableEntry`` 就和 usize 一样，因为它也只是后者的一层简单包装，并解释了 usize 各个比特段的含义。
+- 第 10 行使得我们可以从一个物理页号 ``PhysPageNum`` 和一个页表项标志位 ``PTEFlags`` 生成一个页表项 ``PageTableEntry`` 实例；而第 18 行和第 21 行则实现了分别可以从一个页表项将它们两个取出的方法。
+- 第 15 行中，我们也可以通过 ``empty`` 方法生成一个全零的页表项，注意这隐含着该页表项的 ``V`` 标志位为 0 ，因此它是不合法的。
+
+后面我们还为 ``PageTableEntry`` 实现了一些辅助函数(Helper Function)，可以快速判断一个页表项的 ``V/NR/W/NX`` 标志位是否为 1 。以 ``V`` 标志位的判断为例：
+
+.. code-block:: rust
+
+    // os/src/mm/page_table.rs
+
+    impl PageTableEntry {
+        pub fn is_valid(&self) -> bool {
+            (self.flags() & PTEFlags::V) != PTEFlags::empty()
+        }
+    }
+
+这里相当于判断两个集合的交集是否为空集，部分说明了 ``bitflags`` crate 的使用方法。
 
 .. _term-manage-phys-frame:
 
@@ -25,9 +219,9 @@
 
     // os/src/config.rs
 
-    pub const MEMORY_END: usize = 0x80800000;
+    pub const MEMORY_END: usize = 0xfffffff;
 
-我们硬编码整块物理内存的终止物理地址为 ``0x80800000`` 。 而 :ref:`之前 <term-physical-memory>` 提到过物理内存的起始物理地址为 ``0x80000000`` ，这意味着我们将可用内存大小设置为 :math:`8\text{MiB}` 。实际上在 Qemu 模拟器上可以通过设置使用更大的物理内存，但这里我们希望它和真实硬件 K210 的配置保持一致，因此设置为仅使用 :math:`8\text{MiB}` 。我们用一个左闭右开的物理页号区间来表示可用的物理内存，则：
+我们硬编码整块物理内存的终止物理地址为 ``0xfffffff`` 。 而 :ref:`之前 <term-physical-memory>` 提到过在目前的实验环境下可用 RAM 被分为两个部分，即 ``0x0000000-0xfffffff`` 的 ``lowram`` 和 ``0x90000000`` 之后的 ``highram``，在这里我们只使用最低的 :math:`256\text{MiB}` 的 ``lowram`` ，感兴趣的同学可以将 ``highram`` 也纳入内存管理的范围。我们用一个左闭右开的物理页号区间来表示可用的物理内存，则：
 
 - 区间的左端点应该是 ``ekernel`` 的物理地址以上取整方式转化成的物理页号；
 - 区间的右端点应该是 ``MEMORY_END`` 以下取整方式转化成的物理页号。
@@ -302,7 +496,7 @@
 页表基本数据结构与访问接口
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-我们知道，SV39 多级页表是以节点为单位进行管理的。每个节点恰好存储在一个物理页帧中，它的位置可以用一个物理页号来表示。
+我们知道，LoongArch 多级页表是以节点为单位进行管理的。每个节点恰好存储在一个物理页帧中，它的位置可以用一个物理页号来表示。
 
 .. code-block:: rust
     :linenos:
@@ -346,7 +540,7 @@
 
 在上述操作的过程中，内核需要能访问或修改多级页表节点的内容。即在操作某个多级页表或管理物理页帧的时候，操作系统要能够读写与一个给定的物理页号对应的物理页帧上的数据。这是因为，在多级页表的架构中，每个节点都被保存在一个物理页帧中，一个节点所在物理页帧的物理页号其实就是指向该节点的“指针”。
 
-在尚未启用分页模式之前，内核和应用的代码都可以通过物理地址直接访问内存。而在打开分页模式之后，运行在 S 特权级的内核与运行在 U 特权级的应用在访存上都会受到影响，它们的访存地址会被视为一个当前地址空间（ ``satp`` CSR 给出当前多级页表根节点的物理页号）中的一个虚拟地址，需要 MMU 查相应的多级页表完成地址转换变为物理地址，即地址空间中虚拟地址指向的数据真正被内核放在的物理内存中的位置，然后才能访问相应的数据。此时，如果想要访问一个特定的物理地址 ``pa`` 所指向的内存上的数据，就需要 **构造** 对应的一个虚拟地址 ``va`` ，使得当前地址空间的页表存在映射 :math:`\text{va}\rightarrow\text{pa}` ，且页表项中的保护位允许这种访问方式。于是，在代码中我们只需访问地址 ``va`` ，它便会被 MMU 通过地址转换变成 ``pa`` ，这样我们就做到了在启用分页模式的情况下也能正常访问内存。
+在尚未启用分页模式之前，内核和应用的代码都可以通过物理地址直接访问内存。而在打开分页模式之后，运行在 PLV0 特权级的内核与运行在 PLV3 特权级的应用在访存上都会受到影响，它们的访存地址会被视为一个当前地址空间（ ``pgdl`` 和 ``pgdh`` CSR 给出当前多级页表根节点的物理地址）中的一个虚拟地址，需要 MMU 查相应的多级页表完成地址转换变为物理地址，即地址空间中虚拟地址指向的数据真正被内核放在的物理内存中的位置，然后才能访问相应的数据。此时，如果想要访问一个特定的物理地址 ``pa`` 所指向的内存上的数据，就需要 **构造** 对应的一个虚拟地址 ``va`` ，使得当前地址空间的页表存在映射 :math:`\text{va}\rightarrow\text{pa}` ，且页表项中的保护位允许这种访问方式。于是，在代码中我们只需访问地址 ``va`` ，它便会被 MMU 通过地址转换变成 ``pa`` ，这样我们就做到了在启用分页模式的情况下也能正常访问内存。
 
 .. _term-identical-mapping:
 
@@ -378,22 +572,16 @@
 
     impl PhysPageNum {
         pub fn get_pte_array(&self) -> &'static mut [PageTableEntry] {
-            let pa: PhysAddr = self.clone().into();
-            unsafe {
-                core::slice::from_raw_parts_mut(pa.0 as *mut PageTableEntry, 512)
-            }
+            let pa: PhysAddr = (*self).into();
+            unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut PageTableEntry, TABLE_ENTRY_NUM) }
         }
         pub fn get_bytes_array(&self) -> &'static mut [u8] {
-            let pa: PhysAddr = self.clone().into();
-            unsafe {
-                core::slice::from_raw_parts_mut(pa.0 as *mut u8, 4096)
-            }
+            let pa: PhysAddr = (*self).into();
+            unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, PAGE_SIZE) }
         }
         pub fn get_mut<T>(&self) -> &'static mut T {
-            let pa: PhysAddr = self.clone().into();
-            unsafe {
-                (pa.0 as *mut T).as_mut().unwrap()
-            }
+            let pa: PhysAddr = (*self).into();
+            unsafe { (pa.0 as *mut T).as_mut().unwrap() }
         }
     }
 
@@ -433,8 +621,8 @@
             let mut vpn = self.0;
             let mut idx = [0usize; 3];
             for i in (0..3).rev() {
-                idx[i] = vpn & 511;
-                vpn >>= 9;
+                idx[i] = vpn & (TABLE_ENTRY_NUM - 1);
+                vpn >>= TABLE_ENTRY_NUM_BITS;
             }
             idx
         }
@@ -481,7 +669,7 @@
         }
     }
 
-- ``VirtPageNum`` 的 ``indexes`` 可以取出虚拟页号的三级页索引，并按照从高到低的顺序返回。注意它里面包裹的 usize 可能有 :math:`27` 位，也有可能有 :math:`64-12=52` 位，但这里我们是用来在多级页表上进行遍历，因此只取出低 :math:`27` 位。
+- ``VirtPageNum`` 的 ``indexes`` 可以取出虚拟页号的三级页索引，并按照从高到低的顺序返回。注意这里我们是用来在多级页表上进行遍历，因此只取出其包裹的 ``usize`` 的低 :math:`33` 位。
 - ``PageTable::find_pte_create`` 在多级页表找到一个虚拟页号对应的页表项的可变引用。如果在遍历的过程中发现有节点尚未创建则会新建一个节点。
 
   变量 ``ppn`` 表示当前节点的物理页号，最开始指向多级页表的根节点。随后每次循环通过 ``get_pte_array`` 将取出当前节点的页表项数组，并根据当前级页索引找到对应的页表项。如果当前节点是一个叶节点，那么直接返回这个页表项的可变引用；否则尝试向下走。走不下去的话就新建一个节点，更新作为下级节点指针的页表项，并将新分配的物理页帧移动到向量 ``frames`` 中方便后续的自动回收。注意在更新页表项的时候，不仅要更新物理页号，还要将标志位 V 置 1，不然硬件在查多级页表的时候，会认为这个页表项不合法，从而触发 Page Fault 而不能向下走。
@@ -521,15 +709,14 @@
 
     impl PageTable {
         /// Temporarily used to get arguments from user space.
-        pub fn from_token(satp: usize) -> Self {
+        pub fn from_token(pgdl: usize) -> Self {
             Self {
-                root_ppn: PhysPageNum::from(satp & ((1usize << 44) - 1)),
+                root_ppn: PhysPageNum::from(pgdl >> PAGE_SIZE_BITS),
                 frames: Vec::new(),
             }
         }
         pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-            self.find_pte(vpn)
-                .map(|pte| {pte.clone()})
+            self.find_pte(vpn).map(|pte| *pte)
         }
     }
 
@@ -538,4 +725,4 @@
 
 之后，当遇到需要查一个特定页表（非当前正处在的地址空间的页表时），便可先通过 ``PageTable::from_token`` 新建一个页表，再调用它的 ``translate`` 方法查页表。
 
-小结一下，上一节和本节讲解了如何基于 RISC-V64 的 SV39 分页机制建立多级页表，并实现基于虚存地址空间的内存使用环境。这样，一旦启用分页机制，操作系统和应用都只能在虚拟地址空间中访问数据了，只是操作系统可以通过页表机制来限制应用访问的实际物理内存范围。这就要在后续小节中，进一步看看操作系统内核和应用程序是如何在虚拟地址空间中进行代码和数据访问的。
+小结一下，上一节和本节讲解了如何基于 LoongArch 64 的分页机制建立多级页表，并实现基于虚存地址空间的内存使用环境。这样，一旦启用分页机制，操作系统和应用都只能在虚拟地址空间中访问数据了，只是操作系统可以通过页表机制来限制应用访问的实际物理内存范围。这就要在后续小节中，进一步看看操作系统内核和应用程序是如何在虚拟地址空间中进行代码和数据访问的。

@@ -15,7 +15,7 @@
 - 实现特权级的穿越
 - 支持跨特权级的系统调用功能
 
-上一章，我们在 RISC-V 64 裸机平台上成功运行起来了 ``Hello, world!`` 。看起来这个过程非常顺利，只需要一条命令就能全部完成。但实际上，在那个计算机刚刚诞生的年代，很多事情并不像我们想象的那么简单。 当时，程序被记录在打孔的卡片上，使用汇编语言甚至机器语言来编写。而稀缺且昂贵的计算机由专业的管理员负责操作，就和我们在上一章所做的事情一样，他们手动将卡片输入计算机，等待程序运行结束或者终止程序的运行。最后，他们从计算机的输出端——也就是打印机中取出程序的输出并交给正在休息室等待的程序提交者。
+上一章，我们在 LoongArch 64 裸机平台上成功运行起来了 ``Hello, world!`` 。看起来这个过程非常顺利，只需要一条命令就能全部完成。但实际上，在那个计算机刚刚诞生的年代，很多事情并不像我们想象的那么简单。 当时，程序被记录在打孔的卡片上，使用汇编语言甚至机器语言来编写。而稀缺且昂贵的计算机由专业的管理员负责操作，就和我们在上一章所做的事情一样，他们手动将卡片输入计算机，等待程序运行结束或者终止程序的运行。最后，他们从计算机的输出端——也就是打印机中取出程序的输出并交给正在休息室等待的程序提交者。
 
 实际上，这样做是一种对于珍贵的计算资源的浪费。因为当时（二十世纪 60 年代）的大型计算机和今天的个人计算机不同，它的体积极其庞大，能够占满一整个空调房间，像巨大的史前生物。当时用户（程序员）将程序输入到穿孔卡片上。用户将一批这些编程的卡片交给系统操作员，然后系统操作员将它们输入计算机。系统管理员在房间的各个地方跑来跑去、或是等待打印机的输出的这些时间段，计算机都并没有在工作。于是，人们希望计算机能够不间断的工作且专注于计算任务本身。
 
@@ -116,43 +116,48 @@
 
 .. code-block:: 
 
-    [RustSBI output]
-    [kernel] Hello, world!
-    [kernel] num_app = 5
-    [kernel] app_0 [0x8020a038, 0x8020af90)
-    [kernel] app_1 [0x8020af90, 0x8020bf80)
-    [kernel] app_2 [0x8020bf80, 0x8020d108)
-    [kernel] app_3 [0x8020d108, 0x8020e0e0)
-    [kernel] app_4 [0x8020e0e0, 0x8020f0b8)
-    [kernel] Loading app_0
-    Hello, world!
-    [kernel] Application exited with code 0
-    [kernel] Loading app_1
-    Into Test store_fault, we will insert an invalid store operation...
-    Kernel should kill this application!
-    [kernel] PageFault in application, kernel killed it.
-    [kernel] Loading app_2
-    3^10000=5079(MOD 10007)
-    3^20000=8202(MOD 10007)
-    3^30000=8824(MOD 10007)
-    3^40000=5750(MOD 10007)
-    3^50000=3824(MOD 10007)
-    3^60000=8516(MOD 10007)
-    3^70000=2510(MOD 10007)
-    3^80000=9379(MOD 10007)
-    3^90000=2621(MOD 10007)
-    3^100000=2749(MOD 10007)
-    Test power OK!
-    [kernel] Application exited with code 0
-    [kernel] Loading app_3
-    Try to execute privileged instruction in U Mode
-    Kernel should kill this application!
-    [kernel] IllegalInstruction in application, kernel killed it.
-    [kernel] Loading app_4
-    Try to access privileged CSR in U Mode
-    Kernel should kill this application!
-    [kernel] IllegalInstruction in application, kernel killed it.
-    [kernel] Panicked at src/batch.rs:58 All applications completed!
+   entry kernel ...
+   [kernel] Hello, world!
+   [TRACE] [kernel] .text [0x100000, 0x10d000)
+   [DEBUG] [kernel] .rodata [0x10d000, 0x114000)
+   [ INFO] [kernel] .data [0x114000, 0x11c000)
+   [ WARN] [kernel] boot_stack top=bottom=0x12c000, lower_bound=0x11c000
+   [ERROR] [kernel] .bss [0x12c000, 0x12d000)
+   [kernel] num_app = 5
+   [kernel] app_0 [0x114038, 0x1157e4)
+   [kernel] app_1 [0x1157e4, 0x117040)
+   [kernel] app_2 [0x117040, 0x118b94)
+   [kernel] app_3 [0x118b94, 0x11a3e0)
+   [kernel] app_4 [0x11a3e0, 0x11bc24)
+   [kernel] Loading app_0
+   Hello, world!
+   [kernel] Application exited with code 0
+   [kernel] Loading app_1
+   Into Test store_fault, we will insert an invalid store operation...
+   Kernel should kill this application!
+   [kernel] Trap::Exception(Exception::PIS) Invalid store operation page exception in application, kernel killed it.
+   [kernel] Loading app_2
+   3^10000=5079(MOD 10007)
+   3^20000=8202(MOD 10007)
+   3^30000=8824(MOD 10007)
+   3^40000=5750(MOD 10007)
+   3^50000=3824(MOD 10007)
+   3^60000=8516(MOD 10007)
+   3^70000=2510(MOD 10007)
+   3^80000=9379(MOD 10007)
+   3^90000=2621(MOD 10007)
+   3^100000=2749(MOD 10007)
+   Test power OK!
+   [kernel] Application exited with code 0
+   [kernel] Loading app_3
+   Try to execute privileged instruction in PLV3 Mode
+   Kernel should kill this application!
+   [kernel] Trap::Exception(Exception::IPE) Instruction privilege level exception in application, kernel killed it.
+   [kernel] Loading app_4
+   Try to access privileged CSR in PLV3 Mode
+   Kernel should kill this application!
+   [kernel] Trap::Exception(Exception::IPE) Instruction privilege level exception in application, kernel killed it.
+   All applications completed!
 
 本章代码树
 -------------------------------------------------
@@ -229,13 +234,13 @@
 
 首先改进应用程序，让它能够在用户态执行，并能发出系统调用。具体而言，编写多个应用小程序，修改编译应用所需的 ``linker.ld`` 文件来   :ref:`调整程序的内存布局  <term-app-mem-layout>` ，让操作系统能够把应用加载到指定内存地址，然后顺利启动并运行应用程序。
 
-在应用程序的运行过程中，操作系统要支持应用程序的输出功能，并还能支持应用程序退出。这需要实现跨特权级的系统调用接口，以及 ``sys_write`` 和 ``sys_exit`` 等具体的系统调用功能。 在具体设计实现上，涉及到内联汇编的编写，以及应用与操作系统内核之间系统调用的参数传递的约定。为了让应用程序在还没实现 ``邓氏鱼`` 操作系统之前就能在Linux for RISC-V 64 上进行运行测试，我们采用了Linux on RISC-V64 的系统调用参数约定。具体实现可参看 :ref:`系统调用 <term-call-syscall>` 小节中的内容。 这样写完应用小例子后，就可以通过  ``qemu-riscv64`` 模拟器进行测试了。  
+在应用程序的运行过程中，操作系统要支持应用程序的输出功能，并还能支持应用程序退出。这需要实现跨特权级的系统调用接口，以及 ``sys_write`` 和 ``sys_exit`` 等具体的系统调用功能。 在具体设计实现上，涉及到内联汇编的编写，以及应用与操作系统内核之间系统调用的参数传递的约定，我们采用了 Linux/LoongArch 系统调用 ABI 约定。具体实现可参看 :ref:`系统调用 <term-call-syscall>` 小节中的内容。
 
-写完应用程序后，还需实现支持多个应用程序轮流启动运行的操作系统。这里首先能把本来相对松散的应用程序执行代码和操作系统执行代码连接在一起，便于   ``qemu-system-riscv64`` 模拟器一次性地加载二者到内存中，并让操作系统能够找到应用程序的位置。为把二者连在一起，需要对生成的应用程序进行改造，首先是把应用程序执行文件从ELF执行文件格式变成Binary格式（通过 ``rust-objcopy`` 可以轻松完成）；然后这些Binary格式的文件通过编译器辅助脚本 ``os/build.rs`` 转变变成 ``os/src/link_app.S`` 这个汇编文件的一部分，并生成各个Binary应用的辅助信息，便于操作系统能够找到应用的位置。编译器会把操作系统的源码和 ``os/src/link_app.S`` 合在一起，编译出操作系统+Binary应用的ELF执行文件，并进一步转变成Binary格式。
+写完应用程序后，还需实现支持多个应用程序轮流启动运行的操作系统。这里首先能把本来相对松散的应用程序执行代码和操作系统执行代码连接在一起，便于   ``qemu-system-riscv64`` 模拟器一次性地加载二者到内存中，并让操作系统能够找到应用程序的位置。为把二者连在一起，需要对生成的应用程序进行改造，首先是把应用程序执行文件从ELF执行文件格式变成Binary格式（通过 ``loongarch64-unknown-linux-gnu-objcopy`` 可以轻松完成）；然后这些Binary格式的文件通过编译器辅助脚本 ``os/build.rs`` 转变变成 ``os/src/link_app.S`` 这个汇编文件的一部分，并生成各个Binary应用的辅助信息，便于操作系统能够找到应用的位置。编译器会把操作系统的源码和 ``os/src/link_app.S`` 合在一起，编译出操作系统+Binary应用的ELF执行文件。
 
 为了定位 Binary 应用在被加载后的内存位置，操作系统本身需要完成对 Binary 应用的位置查找，找到后（通过 ``os/src/link_app.S`` 中的变量和标号信息完成），会把 Binary 应用从加载位置拷贝到 ``user/src/linker.ld`` 指定的物理内存位置（OS的加载应用功能）。在一个应用执行完毕后，操作系统还能加载另外一个应用，这主要是通过 ``AppManagerInner`` 数据结构和对应的函数 ``load_app`` 和 ``run_next_app`` 等来完成对应用的一系列管理功能。这主要在 :ref:`实现批处理操作系统  <term-batchos>` 小节中讲解。
 
-为了让 Binary 应用能够启动和运行，操作系统还需给 Binary 应用分配好对应执行环境所需一系列的资源。这主要包括设置好用户栈和内核栈（在用户态的应用程序与在内核态的操作系统内核需要有各自的栈，避免应用程序破坏内核的执行），实现 Trap 上下文的保存与恢复（让应用能够在发出系统调用到内核态后，还能回到用户态继续执行），完成Trap 分发与处理等工作。由于系统调用和中断处理等内核代码实现涉及用户态与内核态之间的特权级切换细节的汇编代码，与硬件细节联系紧密，所以 :ref:`这部分内容 <term-trap-handle>` 是本章中理解比较困难的地方。如果要了解清楚，需要对涉及到的 RISC-V CSR 寄存器的功能有明确认识。这就需要查看 `RISC-V手册 <http://crva.ict.ac.cn/documents/RISC-V-Reader-Chinese-v2p1.pdf>`_ 的第十章或更加详细的 RISC-V 的特权级规范文档了。有了上面的实现后，就剩下最后一步，实现 **执行应用程序** 的操作系统功能，其主要实现在 ``run_next_app`` 内核函数中 。完成所有这些功能的实现，“邓式鱼” [#dunk]_ 操作系统就可以正常运行，并能管理多个应用按批处理方式在用户态一个接一个地执行了。
+为了让 Binary 应用能够启动和运行，操作系统还需给 Binary 应用分配好对应执行环境所需一系列的资源。这主要包括设置好用户栈和内核栈（在用户态的应用程序与在内核态的操作系统内核需要有各自的栈，避免应用程序破坏内核的执行），实现 Trap 上下文的保存与恢复（让应用能够在发出系统调用到内核态后，还能回到用户态继续执行），完成Trap 分发与处理等工作。由于系统调用和中断处理等内核代码实现涉及用户态与内核态之间的特权级切换细节的汇编代码，与硬件细节联系紧密，所以 :ref:`这部分内容 <term-trap-handle>` 是本章中理解比较困难的地方。如果要了解清楚，需要对涉及到的 LoongArch CSR 寄存器的功能有明确认识。这就需要查看 `龙芯架构参考手册 <https://github.com/Helloworld-lbl/LoongArch-Documents/blob/main/%E9%BE%99%E8%8A%AF%E6%9E%B6%E6%9E%84%E5%8F%82%E8%80%83%E6%89%8B%E5%86%8C%E5%8D%B7%E4%B8%80.pdf>`_ 的第 7 章或更加详细的 LoongArch 的特权级规范文档了。有了上面的实现后，就剩下最后一步，实现 **执行应用程序** 的操作系统功能，其主要实现在 ``run_next_app`` 内核函数中 。完成所有这些功能的实现，“邓式鱼” [#dunk]_ 操作系统就可以正常运行，并能管理多个应用按批处理方式在用户态一个接一个地执行了。
 
 
 .. [#dunk] 邓氏鱼是一种晚泥盆纪（距今约3.82亿至3.59亿年前）的盾皮鱼，其中最大种类体长可达8.79米，重量可达4吨，是当时最大的海洋掠食者，但巨大而沉重的身躯极大地影响了它的运动速度和灵敏度。

@@ -25,7 +25,7 @@
  
     **端序或尾序**
   
-    端序或尾序（Endianness），又称字节顺序。在计算机科学领域中，指电脑内存中或在数字通信链路中，多字节组成的字（Word）的字节（Byte）的排列顺序。字节的排列方式有两个通用规则。例如，将一个多位数的低位放在较小的地址处，高位放在较大的地址处，则称小端序（little-endian）；反之则称大端序（big-endian）。常见的 x86、RISC-V 等架构采用的是小端序。
+    端序或尾序（Endianness），又称字节顺序。在计算机科学领域中，指电脑内存中或在数字通信链路中，多字节组成的字（Word）的字节（Byte）的排列顺序。字节的排列方式有两个通用规则。例如，将一个多位数的低位放在较小的地址处，高位放在较大的地址处，则称小端序（little-endian）；反之则称大端序（big-endian）。常见的 x86、RISC-V、LoongArch 等架构采用的是小端序。
  
 .. note::
  
@@ -35,44 +35,197 @@
 
     基本类型数据对齐是指数据在内存中的偏移地址必须为一个字的整数倍，这种存储数据的方式，可以提升系统在读取数据时的性能。结构体数据对齐，是指在结构体中的上一个数据域结束和下一个数据域开始的地方填充一些无用的字节，以保证每个数据域（假定是基本类型数据）都能够对齐（即按基本类型数据对齐）。
 
-    对于 RISC-V 处理器而言，load/store 指令进行数据访存时，数据在内存中的地址应该对齐。如果访存 32 位数据，内存地址应当按 32 位（4字节）对齐。如果数据的地址没有对齐，执行访存操作将产生异常。这也是在学习内核编程中经常碰到的一种 bug。
+    LoongArch 架构的对齐规则如下：
+
+    * 所有取指操作的访存地址必须 4 字节边界对齐，否则将触发取指地址错例外（ADEF）。
+    * 除了原子访存指令、整数边界检查访存指令和浮点数边界检查访存指令外，其余的 load/store 访存指令可以实现为允许访存地址不对齐。不过，在一个允许访存地址不对齐的实现中，系统态软件可以通过配置 CSR.MISC 中的 ALCL0~ALCL3 控制位，在 PLV0~PLV3 特权等级下，对这些 load/store 访存指令也进行地址对齐检查。对于需要进行地址对齐检查的访存指令，如果其访问的地址不是自然对齐的，将触发地址非对齐例外（ALE）。
 
 
 了解 Qemu 模拟器
 --------------------------------------
 
-我们编写的内核将主要在 Qemu 模拟器上运行来检验其正确性。这样做主要是为了方便快捷，只需在命令行输入一行命令即可让内核跑起来。为了让我们的内核能够正确对接到 Qemu 模拟器上，我们首先要对 Qemu 模拟器有一定的了解。在本书中，我们使用软件 ``qemu-system-riscv64`` 来模拟一台 64 位 RISC-V 架构的计算机，它包含CPU 、物理内存以及若干 I/O 外设。它的具体配置（比如 CPU 的核数或是物理内存的大小）均可由用户通过Qemu的执行参数选项来调整。作为模拟器，在宿主机看来它只是一个用户程序，因此上面提到的资源都是它利用宿主机（即 Qemu 运行所在的平台，如 Linux/Windows/macOS）提供给它的资源模拟出来的。在 Qemu 上模拟出来的某些硬件资源性能很高，甚至接近宿主机上原生资源的性能；而另一些硬件资源的模拟开销较大，从而导致Qemu模拟的整体硬件性能相对较慢。但对于本书所实践的各种操作系统而言，在当前x86-64处理器上的Qemu所模拟的硬件性能已经足够快了。
+我们编写的内核将主要在 Qemu 模拟器上运行来检验其正确性。这样做主要是为了方便快捷，只需在命令行输入一行命令即可让内核跑起来。为了让我们的内核能够正确对接到 Qemu 模拟器上，我们首先要对 Qemu 模拟器有一定的了解。在本书中，我们使用软件 ``qemu-system-loongarch64`` 来模拟一台 64 位 LoongArch 架构的计算机，它包含CPU 、物理内存以及若干 I/O 外设。它的具体配置（比如 CPU 的核数或是物理内存的大小）均可由用户通过Qemu的执行参数选项来调整。作为模拟器，在宿主机看来它只是一个用户程序，因此上面提到的资源都是它利用宿主机（即 Qemu 运行所在的平台，如 Linux/Windows/macOS）提供给它的资源模拟出来的。在 Qemu 上模拟出来的某些硬件资源性能很高，甚至接近宿主机上原生资源的性能；而另一些硬件资源的模拟开销较大，从而导致Qemu模拟的整体硬件性能相对较慢。但对于本书所实践的各种操作系统而言，在当前x86-64处理器上的Qemu所模拟的硬件性能已经足够快了。
 
-接下来我们来看如何启动 Qemu 。从各章节代码中的 ``os/Makefile`` 可以看到，我们使用如下命令来启动 Qemu 并运行我们的内核：
+接下来我们来看如何启动 Qemu 。从各章节代码中的 ``LoongArch-Tools`` 的 ``run.sh`` 中可以看到，我们使用如下命令来启动 Qemu 并运行我们的内核：
 
 .. code-block:: console
    :linenos:
 
-   $ qemu-system-riscv64 \
-       -machine virt \
-       -nographic \
-       -bios ../bootloader/rustsbi-qemu.bin \
-       -device loader,file=target/riscv64gc-unknown-none-elf/release/os.bin,addr=0x80200000
+   $ $QEMU -m $MEM -smp $CPUS -bios $BIOS -kernel $KERNEL -initrd $INITRD -append "$CMDLINE" $GRAPHIC $DEBUG
+
+这些变量都是可配置的，默认情况下会执行下面的命令：
+
+.. code-block:: console
+   :linenos:
+
+   $ ./loongarch-tools/qemu-system-loongarch64 -m 4G -smp 1 -bios ./loongarch-tools/loongarch_bios_0310_debug.bin -kernel kernel -initrd busybox-rootfs.img -append 'root=/dev/ram console=ttyS0,115200 rdinit=/init' -vga none -nographic -s -S
 
 其中各个执行参数选项的含义如下：
 
 .. _term-bootloader:
-
-- ``-machine virt`` 表示将模拟的 64 位 RISC-V 计算机设置为名为 ``virt`` 的虚拟计算机。我们知道，即使同属同一种指令集架构，也会有很多种不同的计算机配置，比如 CPU 的生产厂商和型号不同，支持的 I/O 外设种类也不同。关于 ``virt`` 平台的更多信息可以参考 [#virt_platform]_ 。Qemu 还支持模拟其他 RISC-V 计算机，其中包括由 SiFive 公司生产的著名的 HiFive Unleashed 开发板。
+- ``-m`` 表示 Qemu 模拟器所模拟的计算机的物理内存大小，单位为字节，脚本中默认设置为 4GB 。
+- ``-smp`` 表示 Qemu 模拟器所模拟的计算机的 CPU 核数，脚本中默认设置为 1 。
+- ``-bios`` 表示 Qemu 模拟器所使用的引导加载程序，脚本中默认设置为 ``loongarch_bios_0310_debug.bin`` 。
+- ``-kernel`` 表示 Qemu 模拟器所要运行的内核镜像文件，脚本中默认设置为 ``kernel`` 文件。
+- ``-initrd`` 表示 Qemu 模拟器所要运行的初始根文件系统镜像文件，脚本中默认设置为 ``busybox-rootfs.img`` 文件。
+- ``-append`` 表示 Qemu 模拟器所要运行的内核的启动参数，脚本中默认设置为 ``root=/dev/ram console=ttyS0,115200 rdinit=/init`` 。
+- ``-vga`` 表示 Qemu 模拟器所要使用的显卡类型，脚本中默认设置为 ``none`` ，即不使用任何显卡。
 - ``-nographic`` 表示模拟器不需要提供图形界面，而只需要对外输出字符流。
-- 通过 ``-bios`` 可以设置 Qemu 模拟器开机时用来初始化的引导加载程序（bootloader），这里我们使用预编译好的 ``rustsbi-qemu.bin`` ，它需要被放在与 ``os`` 同级的 ``bootloader`` 目录下，该目录可以从每一章的代码分支中获得。
-- 通过虚拟设备 ``-device`` 中的 ``loader`` 属性可以在 Qemu 模拟器开机之前将一个宿主机上的文件载入到 Qemu 的物理内存的指定位置中， ``file`` 和 ``addr`` 属性分别可以设置待载入文件的路径以及将文件载入到的 Qemu 物理内存上的物理地址。这里我们载入的 ``os.bin`` 被称为 **内核镜像** ，它会被载入到 Qemu 模拟器内存的 ``0x80200000`` 地址处。 那么内核镜像 ``os.bin`` 是怎么来的呢？上一节中我们移除标准库依赖后会得到一个内核可执行文件 ``os`` ，将其进一步处理就能得到 ``os.bin`` ，具体处理流程我们会在后面深入讨论。
+
+上述参数可以通过在运行 ``run.sh`` 脚本时传入相应的参数来修改。如执行 ``./run.sh -k ~/os`` 则可以指定内核镜像为用户 home 目录下的 os 文件。 ``run.sh`` 的使用帮助可以通过执行 ``./run.sh -h`` 获得。
+
+.. _qemu_virt:
+
+.. note:: 
+
+   qemu-system-loongarch64 模拟了一个名为 ``virt`` 的目标机器，该机器与真实的龙架构机器有所不同。真实的龙架构机器今天可以拥有许多不同的品牌和配置，但大多数都使用 Loongson3A5000 / Loongson3B5000 / Loongson3C5000 CPUs 以及 Loongson 7A1000 / 7A2000 桥芯片。而 ``virt`` 机器，正如其名所示，使用 QEMU 的 virtio 框架来模拟各种外设，如磁盘、网络适配器等。
+
+   对于 CPU 部分，它支持大多数 Loongson3A5000 特性，因此可以直接使用开源的龙架构内核。可以参考 `龙架构手册和 Loongson3A5000 手册等 <https://github.com/loongson/LoongArch-Documentation>`_ 以获取更多信息。
+
+   对于外设部分，可以通过 QEMU 的命令行选项添加任何 virtio 设备到机器中。例如，我们使用以下选项来添加 vga、键盘和鼠标到机器中：
+
+   .. code:: console
+
+      -vga virtio -device virtio-keyboard-pci -device virtio-mouse-pci
+
+   如果需要添加更多设备，可以阅读 QEMU 手册。如果要编写这些设备的驱动程序，可以参考 Linux 内核源代码。还可以使用 ``-device ?`` 选项来显示所有可以添加的设备。
+
+   除了 virtio 设备之外，它还模拟了 Loongson7A1000 桥接芯片的 PCIE 控制器、UART 串行端口、实时时钟和电源管理端口。例如：
+   
+   .. list-table:: 
+      :widths: 25 50
+      :header-rows: 1
+
+      * - 物理地址
+        - 设备端口
+      * - 0x1fe001e0
+        - 16550 串口
+      * - 0x100d0010
+        - RTC 端口
+      * - 0x18004000UL
+        - IO
+      * - 0x100d0000
+        - ACPI
+
+   其中 UART 设备被实现为 3A5000 和 LS7A1000 的混合体，其物理地址来自 3A5000 的 uart0，即 0x1fe001e0；但是其中断通过 7A1000 中断控制器传递。在实际硬件上，3A5000 有两个 uart 设备，而 LS7A1000 有另外 4 个 uart 设备（可配置）。
+   
+   可以阅读 QEMU 源代码目录中的 ``hw/loongarch`` 和 7A1000 手册以获取更多信息，设备的示例用法可以参考 Linux 内核源代码。
+
+   中断控制器，包括 IO-APIC 和 PCIE MSI，地址范围为 0x10000000-0x10000fff。PCIE 控制器仅实现了标准模型，PCIE 配置空间映射在物理地址范围 0x2000-0000 到 0x27ff-ffff，PCIE 内存映射在 0x4000-0000 到 0x7fff-ffff，PCIE I/O 映射在 0x1804-0000 到 0x1804-ffff。
 
 Qemu 启动流程
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. _term-physical-memory:
 
+当我们使用工具链中默认提供的 ``loongarch_bios_0310_debug.bin`` 作为 BIOS 时，它会自动进行一系列初始化工作。当我们启动 QEMU 模拟器时（如通过脚本 ``run.sh`` ），在正式运行内核代码之前，终端上会显示大量输出，这些输出就展示了 ``loongarch_bios_0310_debug.bin`` 所做的初始化工作。
+
+当我们在终端看到 ``entry kernel ...`` 这一行时，就表明 BIOS 的初始化工作已经完成，内核已经被加载到指定地址并且程序计数器（Program Couner，简称 PC）以被置为内核第一条指令所在的地址，标志着内核代码由此开始执行。
+
+``loongarch_bios_0310_debug.bin`` 允许我们自行指定内核代码的起始地址，它会自动将我们提供的内核代码加载到我们预先指定的地址上。
+
+首先让我们看一下 ``loongarch_bios_0310_debug.bin`` 是如何分配地址空间的。使用工具链中的 ``run.sh`` 脚本启动 QEMU 模拟器，在看到 ``entry kernel ...`` 之后，先按下 Ctrl+a 键，然后按 c 键，这样就进入了 QEMU 的 monitor 模式，然后输入 ``info mtree`` 命令，即可看到内存空间分配情况。我们在下方列出了一部分命令输出并添加了一些注释。
+
+.. _info-mtree:
+
+.. code-block:: console
+
+   (qemu) info mtree
+   ......
+
+   address-space: cpu-memory-0
+   address-space: memory  // cpu physical memory address space, access via load/store instructions via corresponding virtual addresses
+   0000000000000000-ffffffffffffffff (prio 0, i/o): system
+      0000000000000000-000000000fffffff (prio 0, ram): alias loongarch.lowram @loongarch.ram 0000000000000000-000000000fffffff
+      0000000010000000-00000000100000ff (prio 0, i/o): loongarch_pch_pic.reg32_part1  // LS7A1000's interrupt controller regs
+      0000000010000100-000000001000039f (prio 0, i/o): loongarch_pch_pic.reg8
+      00000000100003a0-0000000010000fff (prio 0, i/o): loongarch_pch_pic.reg32_part2
+      000000001001041c-000000001001041f (prio -1000, i/o): pci-dma-cfg
+      0000000010013ffc-0000000010013fff (prio -1000, i/o): mmio fallback 1
+      00000000100d0000-00000000100d00ff (prio 0, i/o): ls7a_pm  // LS7A1000 power management functions
+         00000000100d000c-00000000100d0013 (prio 0, i/o): acpi-evt
+         00000000100d0014-00000000100d0017 (prio 0, i/o): acpi-cnt
+         00000000100d0018-00000000100d001b (prio 0, i/o): acpi-tmr
+         00000000100d0028-00000000100d002f (prio 0, i/o): acpi-gpe0
+         00000000100d0030-00000000100d0033 (prio 0, i/o): acpi-reset
+      00000000100d0100-00000000100d01ff (prio 0, i/o): ls7a_rtc
+      0000000018000000-0000000018003fff (prio 0, i/o): alias isa-io @io 0000000000000000-0000000000003fff  // legacy io mapped to 0x1800-0000
+      0000000018004000-000000001800ffff (prio 0, i/o): alias pcie-io @gpex_ioport_window 0000000000004000-000000000000ffff  // pcie io mapped here
+      000000001c000000-000000001c3fffff (prio 0, rom): loongarch.bios  // bios start at 0x1c000000
+      000000001c400000-000000001c4fffff (prio 0, rom): fdt
+      000000001e020000-000000001e020007 (prio 0, i/o): fwcfg.data
+      000000001e020008-000000001e020009 (prio 0, i/o): fwcfg.ctl
+      000000001fe001e0-000000001fe001e7 (prio 0, i/o): serial  // uart port
+      0000000020000000-0000000027ffffff (prio 0, i/o): alias pcie-ecam @pcie-mmcfg-mmio 0000000000000000-0000000007ffffff  //pcie config mapped
+      000000002ff00000-000000002ff00007 (prio 0, i/o): loongarch_pch_msi //LS7A MSI interrupt
+      0000000040000000-000000007fffffff (prio 0, i/o): alias pcie-mmio @gpex_mmio_window 0000000040000000-000000007fffffff  //pcie memory mapped
+      0000000090000000-000000017fffffff (prio 0, ram): alias loongarch.highmem @loongarch.ram 0000000010000000-00000000ffffffff  // high part ram
+
+   address-space: cpu-memory-0
+   address-space: memory  // cpu physical memory address space, access via load/store instructions via corresponding virtual addresses
+   0000000000000000-ffffffffffffffff (prio 0, i/o): system
+      0000000000000000-000000000fffffff (prio 0, ram): alias loongarch.lowram @loongarch.ram 0000000000000000-000000000fffffff  // low part ram (256MB)
+      0000000010000000-00000000100000ff (prio 0, i/o): loongarch_pch_pic.reg32_part1  // LS7A1000's interrupt controller regs
+      0000000010000100-000000001000039f (prio 0, i/o): loongarch_pch_pic.reg8
+      00000000100003a0-0000000010000fff (prio 0, i/o): loongarch_pch_pic.reg32_part2
+      000000001001041c-000000001001041f (prio -1000, i/o): pci-dma-cfg
+      0000000010013ffc-0000000010013fff (prio -1000, i/o): mmio fallback 1
+      00000000100d0000-00000000100d00ff (prio 0, i/o): ls7a_pm  // LS7A1000 power management functions
+         00000000100d000c-00000000100d0013 (prio 0, i/o): acpi-evt
+         00000000100d0014-00000000100d0017 (prio 0, i/o): acpi-cnt
+         00000000100d0018-00000000100d001b (prio 0, i/o): acpi-tmr
+         00000000100d0028-00000000100d002f (prio 0, i/o): acpi-gpe0
+         00000000100d0030-00000000100d0033 (prio 0, i/o): acpi-reset
+      00000000100d0100-00000000100d01ff (prio 0, i/o): ls7a_rtc
+      0000000018000000-0000000018003fff (prio 0, i/o): alias isa-io @io 0000000000000000-0000000000003fff  // legacy io mapped to 0x1800-0000
+      0000000018004000-000000001800ffff (prio 0, i/o): alias pcie-io @gpex_ioport_window 0000000000004000-000000000000ffff  // pcie io mapped here
+      000000001c000000-000000001c3fffff (prio 0, rom): loongarch.bios  // bios start at 0x1c000000
+      000000001c400000-000000001c4fffff (prio 0, rom): fdt
+      000000001e020000-000000001e020007 (prio 0, i/o): fwcfg.data
+      000000001e020008-000000001e020009 (prio 0, i/o): fwcfg.ctl
+      000000001fe00060-000000001fe0006f (prio 0, i/o): i8042
+      000000001fe001e0-000000001fe001e7 (prio 0, i/o): serial  // uart port
+      0000000020000000-0000000027ffffff (prio 0, i/o): alias pcie-ecam @pcie-mmcfg-mmio 0000000000000000-0000000007ffffff  //pcie config mapped
+      000000002ff00000-000000002ff00007 (prio 0, i/o): loongarch_pch_msi  //LS7A MSI interrupt
+      0000000040000000-000000007fffffff (prio 0, i/o): alias pcie-mmio @gpex_mmio_window 0000000040000000-000000007fffffff  //pcie memory mapped
+      0000000090000000-000000017fffffff (prio 0, ram): alias loongarch.highmem @loongarch.ram 0000000010000000-00000000ffffffff  // high part ram
+
+
+   address-space: IOCSR  // a special address space accessed via iocsrrd/iocsrwr instructions.
+   0000000000000000-ffffffffffffffff (prio 0, i/o): iocsr
+      0000000000000000-0000000000000427 (prio 0, i/o): iocsr_misc
+      0000000000001000-00000000000010ff (prio 0, i/o): loongarch_ipi
+      0000000000001400-0000000000001cff (prio 0, i/o): loongarch_extioi
+         0000000000001400-00000000000014bf (prio 0, i/o): loongarch_extioi.nodetype
+         00000000000014c0-000000000000167f (prio 0, i/o): loongarch_extioi.ipmap_enable
+         0000000000001680-0000000000001bff (prio 0, i/o): loongarch_extioi.bounce_coreisr
+         0000000000001c00-0000000000001cff (prio 0, i/o): loongarch_extioi.coremap
+
+   ......
+
+   memory-region: gpex_ioport_window  //pcie IO space
+   0000000000000000-000000000000ffff (prio 0, i/o): gpex_ioport_window
+      0000000000000000-000000000000ffff (prio 0, i/o): gpex_ioport
+         0000000000004000-000000000000401f (prio 1, i/o): virtio-pci
+
+   memory-region: pcie-mmcfg-mmio  //pcie cfg space
+   0000000000000000-000000001fffffff (prio 0, i/o): pcie-mmcfg-mmio
+
+   memory-region: gpex_mmio_window  //pcie memory space
+   0000000000000000-ffffffffffffffff (prio 0, i/o): gpex_mmio_window
+      0000000000000000-ffffffffffffffff (prio 0, i/o): gpex_mmio_window
+
+可以看出，CPU 物理地址空间，即可以用 load/store 指令访问的地址空间，有 RAM、I/O、ROM三种类型。其中 RAM 被分为了两部分，即 lowram 和 highram。lowram 的地址范围为 0000000000000000-000000000fffffff。
+
+
+1. 如果加载/存储访问某个物理地址，但该物理地址不存在于 cpu-memory-0 地址空间中，则会触发异常。
+2. 对于确实存在的地址，访问可能根本无法进行。对于i/o地址范围，取决于qemu是否处理了所有地址
+
 在Qemu模拟的 ``virt`` 硬件平台上，物理内存的起始物理地址为 ``0x80000000`` ，物理内存的默认大小为 128MiB ，它可以通过 ``-m`` 选项进行配置。如果使用默认配置的 128MiB 物理内存则对应的物理地址区间为 ``[0x80000000,0x88000000)`` 。如果使用上面给出的命令启动 Qemu ，那么在 Qemu 开始执行任何指令之前，首先把两个文件加载到 Qemu 的物理内存中：即作把作为 bootloader 的 ``rustsbi-qemu.bin`` 加载到物理内存以物理地址 ``0x80000000`` 开头的区域上，同时把内核镜像 ``os.bin`` 加载到以物理地址 ``0x80200000`` 开头的区域上。
 
 为什么加载到这两个位置呢？这与 Qemu 模拟计算机加电启动后的运行流程有关。一般来说，计算机加电之后的启动流程可以分成若干个阶段，每个阶段均由一层软件或 :ref:`固件 <term-firmware>` 负责，每一层软件或固件的功能是进行它应当承担的初始化工作，并在此之后跳转到下一层软件或固件的入口地址，也就是将计算机的控制权移交给了下一层软件或固件。Qemu 模拟的启动流程则可以分为三个阶段：第一个阶段由固化在 Qemu 内的一小段汇编程序负责；第二个阶段由 bootloader 负责；第三个阶段则由内核镜像负责。
 
-- 第一阶段：将必要的文件载入到 Qemu 物理内存之后，Qemu CPU 的程序计数器（PC, Program Counter）会被初始化为 ``0x1000`` ，因此 Qemu 实际执行的第一条指令位于物理地址 ``0x1000`` ，接下来它将执行寥寥数条指令并跳转到物理地址 ``0x80000000`` 对应的指令处并进入第二阶段。从后面的调试过程可以看出，该地址 ``0x80000000`` 被固化在 Qemu 中，作为 Qemu 的使用者，我们在不触及 Qemu 源代码的情况下无法进行更改。
+- 第一阶段：将必要的文件载入到 Qemu 物理内存之后，Qemu CPU 的程序计数器（PC, Program Counter）会被初始化为 ``0x1c000000`` ，因此 Qemu 实际执行的第一条指令位于物理地址 ``0x1c000000`` ，接下来它将执行寥寥数条指令并跳转到物理地址 ``0x80000000`` 对应的指令处并进入第二阶段。从后面的调试过程可以看出，该地址 ``0x80000000`` 被固化在 Qemu 中，作为 Qemu 的使用者，我们在不触及 Qemu 源代码的情况下无法进行更改。
 - 第二阶段：由于 Qemu 的第一阶段固定跳转到 ``0x80000000`` ，我们需要将负责第二阶段的 bootloader ``rustsbi-qemu.bin`` 放在以物理地址 ``0x80000000`` 开头的物理内存中，这样就能保证 ``0x80000000`` 处正好保存 bootloader 的第一条指令。在这一阶段，bootloader 负责对计算机进行一些初始化工作，并跳转到下一阶段软件的入口，在 Qemu 上即可实现将计算机控制权移交给我们的内核镜像 ``os.bin`` 。这里需要注意的是，对于不同的 bootloader 而言，下一阶段软件的入口不一定相同，而且获取这一信息的方式和时间点也不同：入口地址可能是一个预先约定好的固定的值，也有可能是在 bootloader 运行期间才动态获取到的值。我们选用的 RustSBI 则是将下一阶段的入口地址预先约定为固定的 ``0x80200000`` ，在 RustSBI 的初始化工作完成之后，它会跳转到该地址并将计算机控制权移交给下一阶段的软件——也即我们的内核镜像。
 - 第三阶段：为了正确地和上一阶段的 RustSBI 对接，我们需要保证内核的第一条指令位于物理地址 ``0x80200000`` 处。为此，我们需要将内核镜像预先加载到 Qemu 物理内存以地址 ``0x80200000`` 开头的区域上。一旦 CPU 开始执行内核的第一条指令，证明计算机的控制权已经被移交给我们的内核，也就达到了本节的目标。
 

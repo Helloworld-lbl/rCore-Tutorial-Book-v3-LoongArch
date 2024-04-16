@@ -52,48 +52,46 @@
     pub fn new(elf_data: &[u8]) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
-        let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT).into())
-            .unwrap()
-            .ppn();
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = pid_alloc();
         let kernel_stack = KernelStack::new(&pid_handle);
         let kernel_stack_top = kernel_stack.get_top();
+        let trap_cx = kernel_stack_top - size_of::<TrapContext>();
         // push a task context which goes to trap_return to the top of kernel stack
         let task_control_block = Self {
             pid: pid_handle,
             kernel_stack,
-            inner: unsafe { UPSafeCell::new(TaskControlBlockInner {
-                trap_cx_ppn,
-                base_size: user_sp,
-                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                task_status: TaskStatus::Ready,
-                memory_set,
-                parent: None,
-                children: Vec::new(),
-                exit_code: 0,
-            })},
+            inner: unsafe {
+                UPSafeCell::new(TaskControlBlockInner {
+                    // trap_cx_ppn,
+                    base_size: user_sp,
+                    task_cx: TaskContext::goto_trap_return(trap_cx),
+                    task_status: TaskStatus::Ready,
+                    memory_set,
+                    parent: None,
+                    children: Vec::new(),
+                    exit_code: 0,
+                })
+            },
         };
         // prepare TrapContext in user space
-        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        let trap_cx = unsafe { (trap_cx as *mut TrapContext).as_mut().unwrap() };
+        // let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
         *trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp,
             KERNEL_SPACE.exclusive_access().token(),
-            kernel_stack_top,
             trap_handler as usize,
         );
         task_control_block
     }
 
 - 第 11 行我们解析应用的 ELF 执行文件得到应用地址空间 ``memory_set`` ，用户栈在应用地址空间中的位置 ``user_sp`` 以及应用的入口点 ``entry_point`` 。
-- 第 12 行我们手动查页表找到位于应用地址空间中新创建的Trap 上下文被实际放在哪个物理页帧上，用来做后续的初始化。
-- 第 16~19 行我们为该进程分配 PID 以及内核栈，并记录下内核栈在内核地址空间的位置 ``kernel_stack_top`` 。
-- 第 20 行我们在该进程的内核栈上压入初始化的任务上下文，使得第一次任务切换到它的时候可以跳转到 ``trap_return`` 并进入用户态开始执行。
-- 第 21 行我们整合之前的部分信息创建进程控制块 ``task_control_block`` 。
-- 第 37 行我们初始化位于该进程应用地址空间中的 Trap 上下文，使得第一次进入用户态的时候时候能正确跳转到应用入口点并设置好用户栈，同时也保证在 Trap 的时候用户态能正确进入内核态。
-- 第 44 行将 ``task_control_block`` 返回。
+- 第 12~16 行我们为该进程分配 PID 以及内核栈，并记录下内核栈在内核地址空间的位置 ``kernel_stack_top`` 。
+- 第 17 行我们在该进程的内核栈上压入初始化的任务上下文，使得第一次任务切换到它的时候可以跳转到 ``trap_return`` 并进入用户态开始执行。
+- 第 18 行我们整合之前的部分信息创建进程控制块 ``task_control_block`` 。
+- 第 37 行我们初始化位于该进程的 Trap 上下文，使得第一次进入用户态的时候时候能正确跳转到应用入口点并设置好用户栈，同时也保证在 Trap 的时候用户态能正确进入内核态。
+- 第 43 行将 ``task_control_block`` 返回。
 
 进程调度机制
 --------------------------------------------
@@ -114,17 +112,17 @@
     // os/src/trap/mod.rs
 
     #[no_mangle]
-    pub fn trap_handler() -> ! {
+    pub fn trap_handler(cx: &mut TrapContext) -> ! {
         set_kernel_trap_entry();
-        let scause = scause::read();
-        let stval = stval::read();
-        match scause.cause() {
-            Trap::Interrupt(Interrupt::SupervisorTimer) => {
-                set_next_trigger();
+        let estat = estat::read(); // get trap cause
+        let badv = badv::read();
+        match estat.cause() {
+            Trap::Interrupt(Interrupt::TI) => {
+                Ticlr::clear();
                 suspend_current_and_run_next();
             }
-            ...
         }
+        unsafe { asm!("or $sp, $fp, $r0"); }
         trap_return();
     }
 
@@ -190,8 +188,6 @@ fork 系统调用的实现
     impl MemorySet {
         pub fn from_existed_user(user_space: &MemorySet) -> MemorySet {
             let mut memory_set = Self::new_bare();
-            // map trampoline
-            memory_set.map_trampoline();
             // copy data sections/trap_context/user_stack
             for area in user_space.areas.iter() {
                 let new_area = MapArea::from_another(area);
@@ -210,9 +206,7 @@ fork 系统调用的实现
 这需要对内存管理子模块 ``mm`` 做一些拓展：
 
 - 第 4 行的 ``MapArea::from_another`` 可以从一个逻辑段复制得到一个虚拟地址区间、映射方式和权限控制均相同的逻辑段，不同的是由于它还没有真正被映射到物理页帧上，所以 ``data_frames`` 字段为空。
-- 第 18 行的 ``MemorySet::from_existed_user`` 可以复制一个完全相同的地址空间。首先在第 19 行，我们通过 ``new_bare`` 新创建一个空的地址空间，并在第 21 行通过 ``map_trampoline`` 为这个地址空间映射上跳板页面，这是因为我们解析 ELF 创建地址空间的时候，并没有将跳板页作为一个单独的逻辑段插入到地址空间的逻辑段向量 ``areas`` 中，所以这里需要单独映射上。
-  
-  剩下的逻辑段都包含在 ``areas`` 中。我们遍历原地址空间中的所有逻辑段，将复制之后的逻辑段插入新的地址空间，在插入的时候就已经实际分配了物理页帧了。接着我们遍历逻辑段中的每个虚拟页面，对应完成数据复制，这只需要找出两个地址空间中的虚拟页面各被映射到哪个物理页帧，就可转化为将数据从物理内存中的一个位置复制到另一个位置，使用 ``copy_from_slice`` 即可轻松实现。
+- 第 18 行的 ``MemorySet::from_existed_user`` 可以复制一个完全相同的地址空间。在第 19 行，我们首先通过 ``new_bare`` 新创建一个了空的地址空间。然后我们遍历原地址空间中的所有逻辑段，将复制之后的逻辑段插入新的地址空间，在插入的时候就已经实际分配了物理页帧了。接着我们遍历逻辑段中的每个虚拟页面，对应完成数据复制，这只需要找出两个地址空间中的虚拟页面各被映射到哪个物理页帧，就可转化为将数据从物理内存中的一个位置复制到另一个位置，使用 ``copy_from_slice`` 即可轻松实现。
 
 接着，我们实现 ``TaskControlBlock::fork`` 来从父进程的进程控制块创建一份子进程的控制块：
 
@@ -222,60 +216,55 @@ fork 系统调用的实现
     // os/src/task/task.rs
 
     impl TaskControlBlock {
-        pub fn fork(self: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
+        pub fn fork(self: &Arc<Self>) -> Arc<Self> {
             // ---- access parent PCB exclusively
             let mut parent_inner = self.inner_exclusive_access();
             // copy user space(include trap context)
-            let memory_set = MemorySet::from_existed_user(
-                &parent_inner.memory_set
-            );
-            let trap_cx_ppn = memory_set
-                .translate(VirtAddr::from(TRAP_CONTEXT).into())
-                .unwrap()
-                .ppn();
+            let memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
             // alloc a pid and a kernel stack in kernel space
             let pid_handle = pid_alloc();
             let kernel_stack = KernelStack::new(&pid_handle);
             let kernel_stack_top = kernel_stack.get_top();
+            let trap_cx = kernel_stack_top - size_of::<TrapContext>();
             let task_control_block = Arc::new(TaskControlBlock {
                 pid: pid_handle,
                 kernel_stack,
-                inner: unsafe { UPSafeCell::new(TaskControlBlockInner {
-                    trap_cx_ppn,
-                    base_size: parent_inner.base_size,
-                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
-                    memory_set,
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    exit_code: 0,
-                })},
+                inner: unsafe {
+                    UPSafeCell::new(TaskControlBlockInner {
+                        base_size: parent_inner.base_size,
+                        task_cx: TaskContext::goto_trap_return(trap_cx),
+                        task_status: TaskStatus::Ready,
+                        memory_set,
+                        parent: Some(Arc::downgrade(self)),
+                        children: Vec::new(),
+                        exit_code: 0,
+                    })
+                },
             });
             // add child
             parent_inner.children.push(task_control_block.clone());
-            // modify kernel_sp in trap_cx
-            // **** access children PCB exclusively
-            let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
-            trap_cx.kernel_sp = kernel_stack_top;
+            let trap_cx = unsafe { (trap_cx as *mut TrapContext).as_mut().unwrap() };
+            *trap_cx = TrapContext::from_existed(self.get_trap_cx());
             // return
             task_control_block
-            // ---- stop exclusively accessing parent/children PCB automatically
+            // ---- release parent PCB automatically
+            // **** release children PCB automatically
         }
     }
 
 它基本上和新建进程控制块的 ``TaskControlBlock::new`` 是相同的，但要注意以下几点：
 
 - 子进程的地址空间不是通过解析 ELF 文件，而是通过在第 8 行调用 ``MemorySet::from_existed_user`` 复制父进程地址空间得到的；
-- 第 24 行，我们让子进程和父进程的 ``base_size`` ，也即应用数据的大小保持一致；
-- 在 fork 的时候需要注意父子进程关系的维护。第 28 行我们将父进程的弱引用计数放到子进程的进程控制块中，而在第 33 行我们将子进程插入到父进程的孩子向量 ``children`` 中。
+- 第 19 行，我们让子进程和父进程的 ``base_size`` ，也即应用数据的大小保持一致；
+- 在 fork 的时候需要注意父子进程关系的维护。第 23 行我们将父进程的弱引用计数放到子进程的进程控制块中，而在第 30 行我们将子进程插入到父进程的孩子向量 ``children`` 中。
 
-我们在子进程内核栈上压入一个初始化的任务上下文，使得内核一旦通过任务切换到该进程，就会跳转到 ``trap_return`` 来进入用户态。而在复制地址空间的时候，子进程的 Trap 上下文也是完全从父进程复制过来的，这可以保证子进程进入用户态和其父进程回到用户态的那一瞬间 CPU 的状态是完全相同的（后面我们会让它们的返回值不同从而区分两个进程）。而两个进程的应用数据由于地址空间复制的原因也是完全相同的，这是 fork 语义要求做到的。
+我们在子进程内核栈上压入一个初始化的任务上下文，使得内核一旦通过任务切换到该进程，就会跳转到 ``trap_return`` 来进入用户态。最后我们还将父进程的 ``TrapContext`` 复制到子进程的栈顶，这可以保证子进程进入用户态和其父进程回到用户态的那一瞬间 CPU 的状态是完全相同的（后面我们会让它们的返回值不同从而区分两个进程）。而两个进程的应用数据由于地址空间复制的原因也是完全相同的，这是 fork 语义要求做到的。
 
 在具体实现 ``sys_fork`` 的时候，我们需要特别注意如何体现父子进程的差异：
 
 .. code-block:: rust
     :linenos: 
-    :emphasize-lines: 11,28,33
+    :emphasize-lines: 11,26
 
     // os/src/syscall/process.rs
 
@@ -284,10 +273,10 @@ fork 系统调用的实现
         let new_task = current_task.fork();
         let new_pid = new_task.pid.0;
         // modify trap context of new_task, because it returns immediately after switching
-        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        let trap_cx = new_task.get_trap_cx();
         // we do not have to move to next instruction since we have done it before
         // for child process, fork returns 0
-        trap_cx.x[10] = 0;  //x[10] is a0 reg
+        trap_cx.r[4] = 0;
         // add new task to scheduler
         add_task(new_task);
         new_pid as isize
@@ -301,20 +290,14 @@ fork 系统调用的实现
         let scause = scause::read();
         let stval = stval::read();
         match scause.cause() {
-            Trap::Exception(Exception::UserEnvCall) => {
-                // jump to next instruction anyway
-                let mut cx = current_trap_cx();
-                cx.sepc += 4;
-                // get system call return value
-                let result = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]);
-                // cx is changed during sys_exec, so we have to call it again
-                cx = current_trap_cx();
-                cx.x[10] = result as usize;
+            Trap::Exception(Exception::SYS) => {
+                cx.era += 4;
+                cx.r[4] = syscall(cx.r[11], [cx.r[4], cx.r[5], cx.r[6]]) as usize;
             }
         ...
     }    
 
-在调用 ``syscall`` 进行系统调用分发并具体调用 ``sys_fork`` 之前， 第28行，``trap_handler`` 已经将当前进程 Trap 上下文中的 ``sepc`` 向后移动了 4 字节，使得它回到用户态之后，会从发出系统调用的 ``ecall`` 指令的下一条指令开始执行。之后当我们复制地址空间的时候，子进程地址空间 Trap 上下文的 ``sepc``  也是移动之后的值，我们无需再进行修改。
+在调用 ``syscall`` 进行系统调用分发并具体调用 ``sys_fork`` 之前， 第 26 行，``trap_handler`` 已经将当前进程 Trap 上下文中的 ``era`` 向后移动了 4 字节，使得它回到用户态之后，会从发出系统调用的 ``syscall`` 指令的下一条指令开始执行。之后当我们复制地址空间的时候，子进程地址空间 Trap 上下文的 ``era``  也是移动之后的值，我们无需再进行修改。
 
 父子进程回到用户态的瞬间都处于刚刚从一次系统调用返回的状态，但二者的返回值不同。第 8~11 行我们将子进程的 Trap 上下文中用来存放系统调用返回值的 a0 寄存器修改为 0 ；第 33 行，而父进程系统调用的返回值会在 ``trap_handler`` 中 ``syscall`` 返回之后再设置为 ``sys_fork`` 的返回值，这里我们返回子进程的 PID 。这就做到了父进程 ``fork`` 的返回值为子进程的 PID ，而子进程的返回值则为 0 。通过返回值是否为 0 可以区分父子进程。
 
@@ -334,27 +317,21 @@ exec 系统调用的实现
         pub fn exec(&self, elf_data: &[u8]) {
             // memory_set with elf program headers/trampoline/trap context/user stack
             let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
-            let trap_cx_ppn = memory_set
-                .translate(VirtAddr::from(TRAP_CONTEXT).into())
-                .unwrap()
-                .ppn();
-
             // **** access inner exclusively
             let mut inner = self.inner_exclusive_access();
             // substitute memory_set
             inner.memory_set = memory_set;
-            // update trap_cx ppn
-            inner.trap_cx_ppn = trap_cx_ppn;
+            // initialize base_size
+            inner.base_size = user_sp;
             // initialize trap_cx
-            let trap_cx = inner.get_trap_cx();
+            let trap_cx = self.get_trap_cx();
             *trap_cx = TrapContext::app_init_context(
                 entry_point,
                 user_sp,
                 KERNEL_SPACE.exclusive_access().token(),
-                self.kernel_stack.get_top(),
                 trap_handler as usize,
             );
-            // **** stop exclusively accessing inner automatically
+            // **** release inner automatically
         }
     }
 
@@ -408,59 +385,59 @@ exec 系统调用的实现
 
 回到 ``sys_exec`` 的实现，它调用 ``translated_str`` 找到要执行的应用名并试图在应用加载器提供的 ``get_app_data_by_name`` 接口中找到对应的 ELF 格式的数据。如果找到，就调用 ``TaskControlBlock::exec`` 替换掉地址空间并返回 0。这个返回值其实并没有意义，因为我们在替换地址空间的时候本来就对 Trap 上下文重新进行了初始化。如果没有找到，就不做任何事情并返回 -1。在shell程序-user_shell中我们也正是通过这个返回值来判断要执行的应用是否存在。
 
-系统调用后重新获取 Trap 上下文
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. 系统调用后重新获取 Trap 上下文
+.. ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-过去的 ``trap_handler`` 实现是这样处理系统调用的：
+.. 过去的 ``trap_handler`` 实现是这样处理系统调用的：
 
-.. code-block:: rust
-    :linenos:
+.. .. code-block:: rust
+..     :linenos:
 
-    // os/src/trap/mod.rs
+..     // os/src/trap/mod.rs
 
-    #[no_mangle]
-    pub fn trap_handler() -> ! {
-        set_kernel_trap_entry();
-        let cx = current_trap_cx();
-        let scause = scause::read();
-        let stval = stval::read();
-        match scause.cause() {
-            Trap::Exception(Exception::UserEnvCall) => {
-                cx.sepc += 4;
-                cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
-            }
-            ...
-        }
-        trap_return();
-    }
+..     #[no_mangle]
+..     pub fn trap_handler() -> ! {
+..         set_kernel_trap_entry();
+..         let cx = current_trap_cx();
+..         let scause = scause::read();
+..         let stval = stval::read();
+..         match scause.cause() {
+..             Trap::Exception(Exception::UserEnvCall) => {
+..                 cx.sepc += 4;
+..                 cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
+..             }
+..             ...
+..         }
+..         trap_return();
+..     }
 
-这里的 ``cx`` 是当前应用的 Trap 上下文的可变引用，我们需要通过查页表找到它具体被放在哪个物理页帧上，并构造相同的虚拟地址来在内核中访问它。对于系统调用 ``sys_exec`` 来说，一旦调用它之后，我们会发现 ``trap_handler`` 原来上下文中的 ``cx`` 失效了——因为它是用来访问之前地址空间中 Trap 上下文被保存在的那个物理页帧的，而现在它已经被回收掉了。因此，为了能够处理类似的这种情况，我们在 ``syscall`` 分发函数返回之后需要重新获取 ``cx`` ，目前的实现如下：
+.. 这里的 ``cx`` 是当前应用的 Trap 上下文的可变引用，我们需要通过查页表找到它具体被放在哪个物理页帧上，并构造相同的虚拟地址来在内核中访问它。对于系统调用 ``sys_exec`` 来说，一旦调用它之后，我们会发现 ``trap_handler`` 原来上下文中的 ``cx`` 失效了——因为它是用来访问之前地址空间中 Trap 上下文被保存在的那个物理页帧的，而现在它已经被回收掉了。因此，为了能够处理类似的这种情况，我们在 ``syscall`` 分发函数返回之后需要重新获取 ``cx`` ，目前的实现如下：
 
-.. code-block:: rust
-    :linenos:
+.. .. code-block:: rust
+..     :linenos:
 
-    // os/src/trap/mod.rs
+..     // os/src/trap/mod.rs
 
-    #[no_mangle]
-    pub fn trap_handler() -> ! {
-        set_kernel_trap_entry();
-        let scause = scause::read();
-        let stval = stval::read();
-        match scause.cause() {
-            Trap::Exception(Exception::UserEnvCall) => {
-                // jump to next instruction anyway
-                let mut cx = current_trap_cx();
-                cx.sepc += 4;
-                // get system call return value
-                let result = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]);
-                // cx is changed during sys_exec, so we have to call it again
-                cx = current_trap_cx();
-                cx.x[10] = result as usize;
-            }
-            ...
-        }
-        trap_return();
-    }
+..     #[no_mangle]
+..     pub fn trap_handler() -> ! {
+..         set_kernel_trap_entry();
+..         let scause = scause::read();
+..         let stval = stval::read();
+..         match scause.cause() {
+..             Trap::Exception(Exception::UserEnvCall) => {
+..                 // jump to next instruction anyway
+..                 let mut cx = current_trap_cx();
+..                 cx.sepc += 4;
+..                 // get system call return value
+..                 let result = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]);
+..                 // cx is changed during sys_exec, so we have to call it again
+..                 cx = current_trap_cx();
+..                 cx.x[10] = result as usize;
+..             }
+..             ...
+..         }
+..         trap_return();
+..     }
 
 
 shell程序 user_shell 的输入机制
@@ -473,7 +450,7 @@ shell程序 user_shell 的输入机制
     
     // os/src/syscall/fs.rs
 
-    use crate::sbi::console_getchar;
+    use crate::uart::console_getchar;
 
     const FD_STDIN: usize = 0;
 
@@ -502,7 +479,28 @@ shell程序 user_shell 的输入机制
         }
     }
 
-目前我们仅支持从标准输入 ``FD_STDIN`` 即文件描述符 0 读入，且单次读入的长度限制为 1，即每次只能读入一个字符。我们调用 ``sbi`` 子模块提供的从键盘获取输入的接口 ``console_getchar`` ，如果返回 0 则说明还没有输入，我们调用 ``suspend_current_and_run_next`` 暂时切换到其他进程，等下次切换回来的时候再看看是否有输入了。获取到输入之后，我们退出循环并手动查页表将输入的字符正确的写入到应用地址空间。
+目前我们仅支持从标准输入 ``FD_STDIN`` 即文件描述符 0 读入，且单次读入的长度限制为 1，即每次只能读入一个字符。我们调用 ``uart`` 子模块提供的从键盘获取输入的接口 ``console_getchar`` ，如果返回 0 则说明还没有输入，我们调用 ``suspend_current_and_run_next`` 暂时切换到其他进程，等下次切换回来的时候再看看是否有输入了。获取到输入之后，我们退出循环并手动查页表将输入的字符正确的写入到应用地址空间。
+
+类似于第一章实现的 ``console_putchar`` ， ``console_getchar`` 的实现如下：
+
+.. code-block:: rust
+    :linenos:
+
+    // os/src/uart.rs
+
+    const UART_BASE: usize = 0x1fe001e0;
+    const UART0_RBR: usize = UART_BASE + 0;
+    const UART0_LSR: usize = UART_BASE + 5;
+    const LSR_DR_READY: u8 = 1;
+
+    pub fn console_getchar() -> usize {
+        let lsr = io_readb(UART0_LSR);
+        if (lsr & LSR_DR_READY) == 0 {
+            0
+        } else {
+        io_readb(UART0_RBR) as usize
+        }
+    }
 
 注：我们这里还没有涉及 **文件** 的概念，在后续章节中有具体的介绍。
 
@@ -530,33 +528,27 @@ shell程序 user_shell 的输入机制
     // os/src/trap/mod.rs
 
     #[no_mangle]
-    pub fn trap_handler() -> ! {
+    pub fn trap_handler(cx: &mut TrapContext) -> ! {
         set_kernel_trap_entry();
-        let scause = scause::read();
-        let stval = stval::read();
-        match scause.cause() {
-            Trap::Exception(Exception::StoreFault) |
-            Trap::Exception(Exception::StorePageFault) |
-            Trap::Exception(Exception::InstructionFault) |
-            Trap::Exception(Exception::InstructionPageFault) |
-            Trap::Exception(Exception::LoadFault) |
-            Trap::Exception(Exception::LoadPageFault) => {
-                println!(
-                    "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, core dumped.",
-                    scause.cause(),
-                    stval,
-                    current_trap_cx().sepc,
-                );
-                // page fault exit code
+        let estat = estat::read(); // get trap cause
+        let badv = badv::read();
+        match estat.cause() {
+            ...
+            Trap::Exception(Exception::PIS) => {
+                println!("[kernel] Trap::Exception(Exception::PIS) Invalid store operation page exception in application, bad addr = {:#x}, kernel killed it.", badv.bits());
                 exit_current_and_run_next(-2);
             }
-            Trap::Exception(Exception::IllegalInstruction) => {
-                println!("[kernel] IllegalInstruction in application, core dumped.");
-                // illegal instruction exit code
+            Trap::Exception(Exception::PIL) => {
+                println!("[kernel] Trap::Exception(Exception::PIL) Invalid load operation page exception in application, bad addr = {:#x}, kernel killed it.", badv.bits());
+                exit_current_and_run_next(-2);
+            }
+            Trap::Exception(Exception::IPE) => {
+                println!("[kernel] Trap::Exception(Exception::IPE) Instruction privilege level exception in application, kernel killed it.");
                 exit_current_and_run_next(-3);
             }
             ...
         }
+        unsafe { asm!("or $sp, $fp, $r0"); }
         trap_return();
     }
 
@@ -612,7 +604,7 @@ shell程序 user_shell 的输入机制
 - 第 17 行我们将进程控制块中的状态修改为 ``TaskStatus::Zombie`` 即僵尸进程，这样它后续才能被父进程在 ``waitpid`` 系统调用的时候回收；
 - 第 19 行我们将传入的退出码 ``exit_code`` 写入进程控制块中，后续父进程在 ``waitpid`` 的时候可以收集；
 - 第 24~26 行所做的事情是将当前进程的所有子进程挂在初始进程 ``initproc`` 下面，其做法是遍历每个子进程，修改其父进程为初始进程，并加入初始进程的孩子向量中。第 32 行将当前进程的孩子向量清空。
-- 第 34 行对于当前进程占用的资源进行早期回收。在第 4 行可以看出， ``MemorySet::recycle_data_pages`` 只是将地址空间中的逻辑段列表 ``areas`` 清空（即执行 ``Vec``  向量清空），这将导致应用地址空间被回收（即进程的数据和代码对应的物理页帧都被回收），但用来存放页表的那些物理页帧此时还不会被回收（会由父进程最后回收子进程剩余的占用资源）。
+- 第 34 行对于当前进程占用的资源进行早期回收。在第 34 行可以看出， ``MemorySet::recycle_data_pages`` 只是将地址空间中的逻辑段列表 ``areas`` 清空（即执行 ``Vec``  向量清空），这将导致应用地址空间被回收（即进程的数据和代码对应的物理页帧都被回收），但用来存放页表的那些物理页帧此时还不会被回收（会由父进程最后回收子进程剩余的占用资源）。
 - 最后在第 41 行我们调用 ``schedule`` 触发调度及任务切换，由于我们再也不会回到该进程的执行过程中，因此无需关心任务上下文的保存。
 
 父进程回收子进程资源

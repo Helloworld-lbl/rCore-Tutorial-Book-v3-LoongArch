@@ -72,7 +72,7 @@
     app_0_end:  
     ......
 
-在这个文件中，可以看到应用代码和表示应用的元数据信息都放在数据段。第10行是第一个应用的名字 ``exit`` ，第13~14行是第一个应用 ``exit`` 在OS镜像文件中的开始和结束位置；第18行是第一个应用 ``exit`` 的ELF格式执行文件的内容，
+在这个文件中，可以看到应用代码和表示应用的元数据信息都放在数据段。第10行是第一个应用的名字 ``exit`` ，第13~14行是第一个应用 ``exit`` 在OS镜像文件中的开始和结束位置；第18行是第一个应用 ``exit`` 的ELF格式执行文件的内容。
 
 
 基于应用名的应用加载器
@@ -239,13 +239,13 @@
         pub fn new(pid_handle: &PidHandle) -> Self {
             let pid = pid_handle.0;
             let (kernel_stack_bottom, kernel_stack_top) = kernel_stack_position(pid);
-            KERNEL_SPACE
-                .exclusive_access()
-                .insert_framed_area(
-                    kernel_stack_bottom.into(),
-                    kernel_stack_top.into(),
-                    MapPermission::R | MapPermission::W,
-                );
+        TRAMPOLINE_SPACE.
+            exclusive_access().
+            insert_framed_area(
+                kernel_stack_bottom.into(),
+                kernel_stack_top.into(),
+                MapPermission::NX | MapPermission::W | MapPermission::D,
+            );
             KernelStack {
                 pid: pid_handle.0,
             }
@@ -263,7 +263,7 @@
         }
     }
 
-- 第 11 行， ``new`` 方法可以从一个 ``PidHandle`` ，也就是一个已分配的进程标识符中对应生成一个内核栈 ``KernelStack`` 。它调用了第 4 行声明的 ``kernel_stack_position`` 函数来根据进程标识符计算内核栈在内核地址空间中的位置，随即在第 14 行将一个逻辑段插入内核地址空间 ``KERNEL_SPACE`` 中。
+- 第 11 行， ``new`` 方法可以从一个 ``PidHandle`` ，也就是一个已分配的进程标识符中对应生成一个内核栈 ``KernelStack`` 。它调用了第 4 行声明的 ``kernel_stack_position`` 函数来根据进程标识符计算内核栈在内核地址空间中的位置，随即在第 14 行将一个逻辑段插入跳板空间 ``TRAMPOLINE_SPACE`` 中。
 - 第 25 行的 ``push_on_top`` 方法可以将一个类型为 ``T`` 的变量压入内核栈顶并返回其裸指针，这也是一个泛型函数。它在实现的时候用到了第 32 行的 ``get_top`` 方法来获取当前内核栈顶在内核地址空间中的地址。
 
 内核栈 ``KernelStack`` 也用到了 RAII 的思想，具体来说，实际保存它的物理页帧的生命周期与它绑定在一起，当 ``KernelStack`` 生命周期结束后，这些物理页帧也将会被编译器自动回收：
@@ -276,7 +276,7 @@
         fn drop(&mut self) {
             let (kernel_stack_bottom, _) = kernel_stack_position(self.pid);
             let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
-            KERNEL_SPACE
+            TRAMPOLINE_SPACE
                 .exclusive_access()
                 .remove_area_with_start_vpn(kernel_stack_bottom_va.into());
         }
@@ -311,7 +311,6 @@
     }
 
     pub struct TaskControlBlockInner {
-        pub trap_cx_ppn: PhysPageNum,
         pub base_size: usize,
         pub task_cx: TaskContext,
         pub task_status: TaskStatus,
@@ -328,7 +327,6 @@
 
 ``TaskControlBlockInner`` 中则包含下面这些内容：
 
-- ``trap_cx_ppn`` 指出了应用地址空间中的 Trap 上下文（详见第四章）被放在的物理页帧的物理页号。
 - ``base_size`` 的含义是：应用数据仅有可能出现在应用地址空间低于 ``base_size`` 字节的区域中。借助它我们可以清楚的知道应用有多少数据驻留在内存中。
 - ``task_cx`` 将暂停的任务的任务上下文保存在任务控制块中。
 - ``task_status`` 维护当前进程的执行状态。
@@ -346,9 +344,6 @@
     // os/src/task/task.rs
 
     impl TaskControlBlockInner {
-        pub fn get_trap_cx(&self) -> &'static mut TrapContext {
-            self.trap_cx_ppn.get_mut()
-        }
         pub fn get_user_token(&self) -> usize {
             self.memory_set.token()
         }
@@ -373,6 +368,10 @@
         pub fn getpid(&self) -> usize {
             self.pid.0
         }
+        pub fn get_trap_cx(&self) -> &mut TrapContext {
+            let trap_cx = self.kernel_stack.get_top() - size_of::<TrapContext>();
+            unsafe { (trap_cx as *mut TrapContext).as_mut().unwrap() }
+        }
         pub fn new(elf_data: &[u8]) -> Self {...}
         pub fn exec(&self, elf_data: &[u8]) {...}
         pub fn fork(self: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {...}
@@ -380,6 +379,7 @@
 
 - ``inner_exclusive_access`` 通过 ``UPSafeCell<T>.exclusive_access()`` 来得到一个 ``RefMut<'_, TaskControlBlockInner>`` ，它可以被看成一个内层 ``TaskControlBlockInner`` 的可变引用并可以对它指向的内容进行修改。
 - ``getpid`` 以 ``usize`` 的形式返回当前进程的进程标识符。
+- ``get_trap_cx`` 返回对该进程的 ``TrapContext`` 的可变引用。
 - ``new`` 用来创建一个新的进程，目前仅用于内核中手动创建唯一一个初始进程 ``initproc`` 。
 - ``exec`` 用来实现 ``exec`` 系统调用，即当前进程加载并执行另一个 ELF 格式可执行文件。
 - ``fork`` 用来实现 ``fork`` 系统调用，即当前进程 fork 出来一个与之几乎相同的子进程。
